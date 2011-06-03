@@ -93,7 +93,7 @@ class IOLoop(object):
     NONE = 0
     READ = _EPOLLIN
     WRITE = _EPOLLOUT
-    ERROR = _EPOLLERR | _EPOLLHUP | _EPOLLRDHUP
+    ERROR = _EPOLLERR | _EPOLLHUP# | _EPOLLRDHUP # simple_httpclient does not behave well with EPOLLRDHUP
 
     def __init__(self, impl=None):
         self._impl = impl or _poll()
