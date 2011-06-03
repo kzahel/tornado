@@ -50,7 +50,6 @@ frameworks on the Tornado HTTP server and I/O loop. See WSGIContainer for
 details and documentation.
 """
 
-import cStringIO
 import cgi
 import httplib
 import logging
@@ -62,6 +61,13 @@ import urllib
 from tornado import escape
 from tornado import httputil
 from tornado import web
+from tornado.escape import native_str
+from tornado.util import b
+
+try:
+    from io import BytesIO  # python 3
+except ImportError:
+    from cStringIO import StringIO as BytesIO  # python 2
 
 class WSGIApplication(web.Application):
     """A WSGI-equivalent of web.Application.
@@ -82,7 +88,8 @@ class WSGIApplication(web.Application):
         for cookie_dict in getattr(handler, "_new_cookies", []):
             for cookie in cookie_dict.values():
                 headers.append(("Set-Cookie", cookie.OutputString(None)))
-        start_response(status, headers)
+        start_response(status,
+                       [(native_str(k), native_str(v)) for (k,v) in headers])
         return handler._write_buffer
 
 
@@ -107,13 +114,13 @@ class HTTPRequest(object):
         if environ.get("CONTENT_TYPE"):
             self.headers["Content-Type"] = environ["CONTENT_TYPE"]
         if environ.get("CONTENT_LENGTH"):
-            self.headers["Content-Length"] = int(environ["CONTENT_LENGTH"])
+            self.headers["Content-Length"] = environ["CONTENT_LENGTH"]
         for key in environ:
             if key.startswith("HTTP_"):
                 self.headers[key[5:].replace("_", "-")] = environ[key]
         if self.headers.get("Content-Length"):
             self.body = environ["wsgi.input"].read(
-                self.headers["Content-Length"])
+                int(self.headers["Content-Length"]))
         else:
             self.body = ""
         self.protocol = environ["wsgi.url_scheme"]
@@ -226,7 +233,7 @@ class WSGIContainer(object):
         app_response = self.wsgi_application(
             WSGIContainer.environ(request), start_response)
         response.extend(app_response)
-        body = "".join(response)
+        body = b("").join(response)
         if hasattr(app_response, "close"):
             app_response.close()
         if not data: raise Exception("WSGI app did not call start_response")
@@ -242,12 +249,12 @@ class WSGIContainer(object):
         if "server" not in header_set:
             headers.append(("Server", "TornadoServer/%s" % tornado.version))
 
-        parts = ["HTTP/1.1 " + data["status"] + "\r\n"]
+        parts = [escape.utf8("HTTP/1.1 " + data["status"] + "\r\n")]
         for key, value in headers:
-            parts.append(escape.utf8(key) + ": " + escape.utf8(value) + "\r\n")
-        parts.append("\r\n")
+            parts.append(escape.utf8(key) + b(": ") + escape.utf8(value) + b("\r\n"))
+        parts.append(b("\r\n"))
         parts.append(body)
-        request.write("".join(parts))
+        request.write(b("").join(parts))
         request.finish()
         self._log(status_code, request)
 
@@ -267,11 +274,11 @@ class WSGIContainer(object):
             "QUERY_STRING": request.query,
             "REMOTE_ADDR": request.remote_ip,
             "SERVER_NAME": host,
-            "SERVER_PORT": port,
+            "SERVER_PORT": str(port),
             "SERVER_PROTOCOL": request.version,
             "wsgi.version": (1, 0),
             "wsgi.url_scheme": request.protocol,
-            "wsgi.input": cStringIO.StringIO(escape.utf8(request.body)),
+            "wsgi.input": BytesIO(escape.utf8(request.body)),
             "wsgi.errors": sys.stderr,
             "wsgi.multithread": False,
             "wsgi.multiprocess": True,

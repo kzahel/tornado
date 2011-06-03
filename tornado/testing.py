@@ -179,7 +179,12 @@ class AsyncTestCase(unittest.TestCase):
         assert self.__stopped
         self.__stopped = False
         if self.__failure is not None:
-            raise self.__failure[0], self.__failure[1], self.__failure[2]
+            # 2to3 isn't smart enough to convert three-argument raise
+            # statements correctly in some cases.
+            if isinstance(self.__failure[1], self.__failure[0]):
+                raise self.__failure[1], None, self.__failure[2]
+            else:
+                raise self.__failure[0], self.__failure[1], self.__failure[2]
         result = self.__stop_args
         self.__stop_args = None
         return result
@@ -337,9 +342,14 @@ def main():
     try:
         # In order to be able to run tests by their fully-qualified name
         # on the command line without importing all tests here,
-        # module must be set to None (in which case the defaultTest must
-        # also be fully-qualified
-        unittest.main(module=None, defaultTest='__main__.all', argv=argv)
+        # module must be set to None.  Python 3.2's unittest.main ignores
+        # defaultTest if no module is given (it tries to do its own
+        # test discovery, which is incompatible with auto2to3), so don't
+        # set module if we're not asking for a specific test.
+        if len(argv) > 1:
+            unittest.main(module=None, argv=argv)
+        else:
+            unittest.main(defaultTest="all", argv=argv)
     except SystemExit, e:
         if e.code == 0:
             logging.info('PASS')

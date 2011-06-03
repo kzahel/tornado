@@ -66,8 +66,9 @@ class WebSocketHandler(tornado.web.RequestHandler):
 
     This script pops up an alert box that says "You said: Hello, world".
     """
-    def __init__(self, application, request):
-        tornado.web.RequestHandler.__init__(self, application, request)
+    def __init__(self, application, request, **kwargs):
+        tornado.web.RequestHandler.__init__(self, application, request,
+                                            **kwargs)
         self.stream = request.connection.stream
         self.client_terminated = False
         self._waiting = None
@@ -86,7 +87,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
         # This is necessary when using proxies (such as HAProxy), which
         # need to see the Upgrade headers before passing through the
         # non-HTTP traffic that follows.
-        self.stream.write(
+        self.stream.write(tornado.escape.utf8(
             "HTTP/1.1 101 Web Socket Protocol Handshake\r\n"
             "Upgrade: WebSocket\r\n"
             "Connection: Upgrade\r\n"
@@ -97,7 +98,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
                     origin=self.request.headers["Origin"],
                     scheme=scheme,
                     host=self.request.host,
-                    uri=self.request.uri)))
+                    uri=self.request.uri))))
         self.stream.read_bytes(8, self._handle_challenge)
 
     def _handle_challenge(self, challenge):
@@ -190,6 +191,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
         if not self.client_terminated:
             self.async_callback(self.on_message)(
                     frame[:-1].decode("utf-8", "replace"))
+        if not self.client_terminated:
             self._receive_message()
 
     def _on_length_indicator(self, byte):
@@ -257,9 +259,10 @@ class WebSocketRequest(object):
         """Processes the key headers and calculates their key value.
 
         Raises ValueError when feed invalid key."""
-        number, spaces = filter(str.isdigit, key), filter(str.isspace, key)
+        number = int(''.join(c for c in key if c.isdigit()))
+        spaces = len([c for c in key if c.isspace()])
         try:
-            key_number = int(number) / len(spaces)
+            key_number = number / spaces
         except (ValueError, ZeroDivisionError):
             raise ValueError
         return struct.pack(">I", key_number)

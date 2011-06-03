@@ -6,7 +6,7 @@ import weakref
 from tornado.escape import utf8
 from tornado import httputil
 from tornado.ioloop import IOLoop
-from tornado.util import import_object
+from tornado.util import import_object, bytes_type
 
 class HTTPClient(object):
     """A blocking HTTP client.
@@ -137,7 +137,7 @@ class AsyncHTTPClient(object):
         on each IOLoop.  Additional arguments may be supported depending
         on the implementation class in use.
         """
-        if isinstance(impl, basestring):
+        if isinstance(impl, (unicode, bytes_type)):
             impl = import_object(impl)
         if impl is not None and not issubclass(impl, AsyncHTTPClient):
             raise ValueError("Invalid AsyncHTTPClient implementation")
@@ -154,7 +154,8 @@ class HTTPRequest(object):
                  header_callback=None, prepare_curl_callback=None,
                  proxy_host=None, proxy_port=None, proxy_username=None,
                  proxy_password='', allow_nonstandard_methods=False,
-                 validate_cert=True, ca_certs=None):
+                 validate_cert=True, ca_certs=None,
+                 allow_ipv6=None):
         if headers is None:
             headers = httputil.HTTPHeaders()
         if if_modified_since:
@@ -167,12 +168,12 @@ class HTTPRequest(object):
         self.proxy_port = proxy_port
         self.proxy_username = proxy_username
         self.proxy_password = proxy_password
-        self.url = utf8(url)
+        self.url = url
         self.method = method
         self.headers = headers
-        self.body = body
-        self.auth_username = utf8(auth_username)
-        self.auth_password = utf8(auth_password)
+        self.body = utf8(body)
+        self.auth_username = auth_username
+        self.auth_password = auth_password
         self.connect_timeout = connect_timeout
         self.request_timeout = request_timeout
         self.follow_redirects = follow_redirects
@@ -195,6 +196,9 @@ class HTTPRequest(object):
         # SimpleAsyncHTTPClient does not have this limitation.
         self.validate_cert = validate_cert
         self.ca_certs = ca_certs
+        # allow_ipv6 may be True, False, or None for default behavior
+        # that varies by httpclient implementation.
+        self.allow_ipv6 = allow_ipv6
         self.start_time = time.time()
 
 

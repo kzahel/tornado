@@ -54,7 +54,6 @@ from __future__ import with_statement
 import Cookie
 import base64
 import binascii
-import cStringIO
 import calendar
 import contextlib
 import datetime
@@ -81,6 +80,13 @@ from tornado import escape
 from tornado import locale
 from tornado import stack_context
 from tornado import template
+from tornado.escape import utf8
+from tornado.util import b, bytes_type
+
+try:
+    from io import BytesIO  # python 3
+except ImportError:
+    from cStringIO import StringIO as BytesIO  # python 2
 
 class RequestHandler(object):
     """Subclass this class and define get() or post() to make a handler.
@@ -200,19 +206,21 @@ class RequestHandler(object):
         HTTP specification. If the value is not a string, we convert it to
         a string. All header values are then encoded as UTF-8.
         """
-        if isinstance(value, datetime.datetime):
+        if isinstance(value, (unicode, bytes_type)):
+            value = utf8(value)
+            # If \n is allowed into the header, it is possible to inject
+            # additional headers or split the request. Also cap length to
+            # prevent obviously erroneous values.
+            safe_value = re.sub(b(r"[\x00-\x1f]"), b(" "), value)[:4000]
+            if safe_value != value:
+                raise ValueError("Unsafe header value %r", value)
+        elif isinstance(value, datetime.datetime):
             t = calendar.timegm(value.utctimetuple())
             value = email.utils.formatdate(t, localtime=False, usegmt=True)
         elif isinstance(value, int) or isinstance(value, long):
             value = str(value)
         else:
-            value = _utf8(value)
-            # If \n is allowed into the header, it is possible to inject
-            # additional headers or split the request. Also cap length to
-            # prevent obviously erroneous values.
-            safe_value = re.sub(r"[\x00-\x1f]", " ", value)[:4000]
-            if safe_value != value:
-                raise ValueError("Unsafe header value %r", value)
+            raise TypeError("Unsupported header value %r" % value)
         self._headers[name] = value
 
     _ARG_DEFAULT = []
@@ -220,7 +228,7 @@ class RequestHandler(object):
         """Returns the value of the argument with the given name.
 
         If default is not provided, the argument is considered to be
-        required, and we throw an HTTP 404 exception if it is missing.
+        required, and we throw an HTTP 400 exception if it is missing.
 
         If the argument appears in the url more than once, we return the
         last value.
@@ -230,7 +238,7 @@ class RequestHandler(object):
         args = self.get_arguments(name, strip=strip)
         if not args:
             if default is self._ARG_DEFAULT:
-                raise HTTPError(404, "Missing argument %s" % name)
+                raise HTTPError(400, "Missing argument %s" % name)
             return default
         return args[-1]
 
@@ -241,14 +249,32 @@ class RequestHandler(object):
 
         The returned values are always unicode.
         """
-        values = self.request.arguments.get(name, [])
-        # Get rid of any weird control chars
-        values = [re.sub(r"[\x00-\x08\x0e-\x1f]", " ", x) for x in values]
-        values = [_unicode(x) for x in values]
-        if strip:
-            values = [x.strip() for x in values]
+        values = []
+        for v in self.request.arguments.get(name, []):
+            v = self.decode_argument(v, name=name)
+            if isinstance(v, unicode):
+                # Get rid of any weird control chars (unless decoding gave
+                # us bytes, in which case leave it alone)
+                v = re.sub(r"[\x00-\x08\x0e-\x1f]", " ", v)
+            if strip:
+                v = v.strip()
+            values.append(v)
         return values
 
+    def decode_argument(self, value, name=None):
+        """Decodes an argument from the request.
+
+        The argument has been percent-decoded and is now a byte string.
+        By default, this method decodes the argument as utf-8 and returns
+        a unicode string, but this may be overridden in subclasses.
+
+        This method is used as a filter for both get_argument() and for
+        values extracted from the url and passed to get()/post()/etc.
+
+        The name of the argument is provided if known, but may be None
+        (e.g. for unnamed groups in the url regex).
+        """
+        return _unicode(value)
 
     @property
     def cookies(self):
@@ -257,7 +283,8 @@ class RequestHandler(object):
             self._cookies = Cookie.BaseCookie()
             if "Cookie" in self.request.headers:
                 try:
-                    self._cookies.load(self.request.headers["Cookie"])
+                    self._cookies.load(
+                        escape.native_str(self.request.headers["Cookie"]))
                 except:
                     self.clear_all_cookies()
         return self._cookies
@@ -277,8 +304,9 @@ class RequestHandler(object):
         See http://docs.python.org/library/cookie.html#morsel-objects
         for available attributes.
         """
-        name = _utf8(name)
-        value = _utf8(value)
+        # The cookie library only accepts type str, in both python 2 and 3
+        name = escape.native_str(name)
+        value = escape.native_str(value)
         if re.search(r"[\x00-\x20]", name + value):
             # Don't let us accidentally inject bad stuff
             raise ValueError("Invalid cookie %r: %r" % (name, value))
@@ -331,10 +359,10 @@ class RequestHandler(object):
         method for non-cookie uses.  To decode a value not stored
         as a cookie use the optional value argument to get_secure_cookie.
         """
-        timestamp = str(int(time.time()))
-        value = base64.b64encode(value)
+        timestamp = utf8(str(int(time.time())))
+        value = base64.b64encode(utf8(value))
         signature = self._cookie_signature(name, value, timestamp)
-        value = "|".join([value, timestamp, signature])
+        value = b("|").join([value, timestamp, signature])
         return value
 
     def get_secure_cookie(self, name, include_name=True, value=None):
@@ -349,7 +377,7 @@ class RequestHandler(object):
         """
         if value is None: value = self.get_cookie(name)
         if not value: return None
-        parts = value.split("|")
+        parts = utf8(value).split(b("|"))
         if len(parts) != 3: return None
         if include_name:
             signature = self._cookie_signature(name, parts[0], parts[1])
@@ -370,7 +398,7 @@ class RequestHandler(object):
             # here instead of modifying _cookie_signature.
             logging.warning("Cookie timestamp in future; possible tampering %r", value)
             return None
-        if parts[1].startswith("0"):
+        if parts[1].startswith(b("0")):
             logging.warning("Tampered cookie %r", value)
         try:
             return base64.b64decode(parts[0])
@@ -379,10 +407,10 @@ class RequestHandler(object):
 
     def _cookie_signature(self, *parts):
         self.require_setting("cookie_secret", "secure cookies")
-        hash = hmac.new(self.application.settings["cookie_secret"],
+        hash = hmac.new(utf8(self.application.settings["cookie_secret"]),
                         digestmod=hashlib.sha1)
-        for part in parts: hash.update(part)
-        return hash.hexdigest()
+        for part in parts: hash.update(utf8(part))
+        return utf8(hash.hexdigest())
 
     def redirect(self, url, permanent=False):
         """Sends a redirect to the given (optionally relative) URL."""
@@ -390,8 +418,9 @@ class RequestHandler(object):
             raise Exception("Cannot redirect after headers have been written")
         self.set_status(301 if permanent else 302)
         # Remove whitespace
-        url = re.sub(r"[\x00-\x20]+", "", _utf8(url))
-        self.set_header("Location", urlparse.urljoin(self.request.uri, url))
+        url = re.sub(b(r"[\x00-\x20]+"), "", utf8(url))
+        self.set_header("Location", urlparse.urljoin(utf8(self.request.uri),
+                                                     url))
         self.finish()
 
     def write(self, chunk):
@@ -400,7 +429,9 @@ class RequestHandler(object):
         To write the output to the network, use the flush() method below.
 
         If the given chunk is a dictionary, we write it as JSON and set
-        the Content-Type of the response to be text/javascript.
+        the Content-Type of the response to be application/json.
+        (if you want to send JSON as a different Content-Type, call
+        set_header *after* calling write()).
 
         Note that lists are not converted to JSON because of a potential
         cross-site security vulnerability.  All JSON output should be
@@ -410,8 +441,8 @@ class RequestHandler(object):
         assert not self._finished
         if isinstance(chunk, dict):
             chunk = escape.json_encode(chunk)
-            self.set_header("Content-Type", "text/javascript; charset=UTF-8")
-        chunk = _utf8(chunk)
+            self.set_header("Content-Type", "application/json; charset=UTF-8")
+        chunk = utf8(chunk)
         self._write_buffer.append(chunk)
 
     def render(self, template_name, **kwargs):
@@ -427,31 +458,33 @@ class RequestHandler(object):
         html_bodies = []
         for module in getattr(self, "_active_modules", {}).itervalues():
             embed_part = module.embedded_javascript()
-            if embed_part: js_embed.append(_utf8(embed_part))
+            if embed_part: js_embed.append(utf8(embed_part))
             file_part = module.javascript_files()
             if file_part:
-                if isinstance(file_part, basestring):
+                if isinstance(file_part, (unicode, bytes_type)):
                     js_files.append(file_part)
                 else:
                     js_files.extend(file_part)
             embed_part = module.embedded_css()
-            if embed_part: css_embed.append(_utf8(embed_part))
+            if embed_part: css_embed.append(utf8(embed_part))
             file_part = module.css_files()
             if file_part:
-                if isinstance(file_part, basestring):
+                if isinstance(file_part, (unicode, bytes_type)):
                     css_files.append(file_part)
                 else:
                     css_files.extend(file_part)
             head_part = module.html_head()
-            if head_part: html_heads.append(_utf8(head_part))
+            if head_part: html_heads.append(utf8(head_part))
             body_part = module.html_body()
-            if body_part: html_bodies.append(_utf8(body_part))
+            if body_part: html_bodies.append(utf8(body_part))
+        def is_absolute(path):
+            return any(path.startswith(x) for x in ["/", "http:", "https:"])
         if js_files:
             # Maintain order of JavaScript files given by modules
             paths = []
             unique_paths = set()
             for path in js_files:
-                if not path.startswith("/") and not path.startswith("http:"):
+                if not is_absolute(path):
                     path = self.static_url(path)
                 if path not in unique_paths:
                     paths.append(path)
@@ -470,7 +503,7 @@ class RequestHandler(object):
             paths = []
             unique_paths = set()
             for path in css_files:
-                if not path.startswith("/") and not path.startswith("http:"):
+                if not is_absolute(path):
                     path = self.static_url(path)
                 if path not in unique_paths:
                     paths.append(path)
@@ -510,8 +543,7 @@ class RequestHandler(object):
         if not getattr(RequestHandler, "_templates", None):
             RequestHandler._templates = {}
         if template_path not in RequestHandler._templates:
-            loader = self.application.settings.get("template_loader") or\
-              template.Loader(template_path)
+            loader = self.create_template_loader(template_path)
             RequestHandler._templates[template_path] = loader
         t = RequestHandler._templates[template_path].load(template_name)
         args = dict(
@@ -528,12 +560,24 @@ class RequestHandler(object):
         args.update(kwargs)
         return t.generate(**args)
 
+    def create_template_loader(self, template_path):
+        settings = self.application.settings
+        if "template_loader" in settings:
+            return settings["template_loader"]
+        kwargs = {}
+        if "autoescape" in settings:
+            # autoescape=None means "no escaping", so we have to be sure
+            # to only pass this kwarg if the user asked for it.
+            kwargs["autoescape"] = settings["autoescape"]
+        return template.Loader(template_path, **kwargs)
+
+
     def flush(self, include_footers=False):
         """Flushes the current output buffer to the network."""
         if self.application._wsgi:
             raise Exception("WSGI applications do not support flush()")
 
-        chunk = "".join(self._write_buffer)
+        chunk = b("").join(self._write_buffer)
         self._write_buffer = []
         if not self._headers_written:
             self._headers_written = True
@@ -544,7 +588,7 @@ class RequestHandler(object):
         else:
             for transform in self._transforms:
                 chunk = transform.transform_chunk(chunk, include_footers)
-            headers = ""
+            headers = b("")
 
         # Ignore the chunk and only write the headers for HEAD requests
         if self.request.method == "HEAD":
@@ -565,16 +609,14 @@ class RequestHandler(object):
             if (self._status_code == 200 and
                 self.request.method in ("GET", "HEAD") and
                 "Etag" not in self._headers):
-                hasher = hashlib.sha1()
-                for part in self._write_buffer:
-                    hasher.update(part)
-                etag = '"%s"' % hasher.hexdigest()
-                inm = self.request.headers.get("If-None-Match")
-                if inm and inm.find(etag) != -1:
-                    self._write_buffer = []
-                    self.set_status(304)
-                else:
-                    self.set_header("Etag", etag)
+                etag = self.compute_etag()
+                if etag is not None:
+                    inm = self.request.headers.get("If-None-Match")
+                    if inm and inm.find(etag) != -1:
+                        self._write_buffer = []
+                        self.set_status(304)
+                    else:
+                        self.set_header("Etag", etag)
             if "Content-Length" not in self._headers:
                 content_length = sum(len(part) for part in self._write_buffer)
                 self.set_header("Content-Length", content_length)
@@ -798,7 +840,7 @@ class RequestHandler(object):
                                 path)
         if abs_path not in hashes:
             try:
-                f = open(abs_path)
+                f = open(abs_path, "rb")
                 hashes[abs_path] = hashlib.md5(f.read()).hexdigest()
                 f.close()
             except:
@@ -841,6 +883,17 @@ class RequestHandler(object):
     def reverse_url(self, name, *args):
         return self.application.reverse_url(name, *args)
 
+    def compute_etag(self):
+        """Computes the etag header to be used for this request.
+
+        May be overridden to provide custom etag implementations,
+        or may return None to disable tornado's default etag support.
+        """
+        hasher = hashlib.sha1()
+        for part in self._write_buffer:
+            hasher.update(part)
+        return '"%s"' % hasher.hexdigest()
+
     def _stack_context_handle_exception(self, type, value, traceback):
         try:
             # For historical reasons _handle_request_exception only takes
@@ -866,18 +919,22 @@ class RequestHandler(object):
                 self.check_xsrf_cookie()
             self.prepare()
             if not self._finished:
+                args = [self.decode_argument(arg) for arg in args]
+                kwargs = dict((k, self.decode_argument(v, name=k))
+                              for (k,v) in kwargs.iteritems())
                 getattr(self, self.request.method.lower())(*args, **kwargs)
                 if self._auto_finish and not self._finished:
                     self.finish()
 
     def _generate_headers(self):
-        lines = [self.request.version + " " + str(self._status_code) + " " +
-                 httplib.responses[self._status_code]]
-        lines.extend(["%s: %s" % (n, v) for n, v in self._headers.iteritems()])
+        lines = [utf8(self.request.version + " " +
+                      str(self._status_code) +
+                      " " + httplib.responses[self._status_code])]
+        lines.extend([(utf8(n) + b(": ") + utf8(v)) for n, v in self._headers.iteritems()])
         for cookie_dict in getattr(self, "_new_cookies", []):
             for cookie in cookie_dict.values():
-                lines.append("Set-Cookie: " + cookie.OutputString(None))
-        return "\r\n".join(lines) + "\r\n\r\n"
+                lines.append(utf8("Set-Cookie: " + cookie.OutputString(None)))
+        return b("\r\n").join(lines) + b("\r\n\r\n")
 
     def _log(self):
         """Logs the current request.
@@ -889,8 +946,8 @@ class RequestHandler(object):
         self.application.log_request(self)
 
     def _request_summary(self):
-        return self.request.method + " " + self.request.uri + " (" + \
-            self.request.remote_ip + ")"
+        return self.request.method + " " + self.request.uri + \
+            " (" + self.request.remote_ip + ")"
 
     def _handle_request_exception(self, e):
         if isinstance(e, HTTPError):
@@ -1182,15 +1239,17 @@ class Application(object):
             for spec in handlers:
                 match = spec.regex.match(request.path)
                 if match:
-                    # None-safe wrapper around urllib.unquote to handle
+                    # None-safe wrapper around url_unescape to handle
                     # unmatched optional groups correctly
                     def unquote(s):
                         if s is None: return s
-                        return urllib.unquote(s)
+                        return escape.url_unescape(s, encoding=None)
                     handler = spec.handler_class(self, request, **spec.kwargs)
                     # Pass matched groups to the handler.  Since
                     # match.groups() includes both named and unnamed groups,
                     # we want to use either groups or groupdict but not both.
+                    # Note that args are passed as bytes so the handler can
+                    # decide what encoding to use.
                     kwargs = dict((k, unquote(v))
                                   for (k, v) in match.groupdict().iteritems())
                     if kwargs:
@@ -1427,14 +1486,14 @@ class GZipContentEncoding(OutputTransform):
 
     def transform_first_chunk(self, headers, chunk, finishing):
         if self._gzipping:
-            ctype = headers.get("Content-Type", "").split(";")[0]
+            ctype = _unicode(headers.get("Content-Type", "")).split(";")[0]
             self._gzipping = (ctype in self.CONTENT_TYPES) and \
                 (not finishing or len(chunk) >= self.MIN_LENGTH) and \
                 (finishing or "Content-Length" not in headers) and \
                 ("Content-Encoding" not in headers)
         if self._gzipping:
             headers["Content-Encoding"] = "gzip"
-            self._gzip_value = cStringIO.StringIO()
+            self._gzip_value = BytesIO()
             self._gzip_file = gzip.GzipFile(mode="w", fileobj=self._gzip_value)
             self._gzip_pos = 0
             chunk = self.transform_chunk(chunk, finishing)
@@ -1479,9 +1538,9 @@ class ChunkedTransferEncoding(OutputTransform):
             # Don't write out empty chunks because that means END-OF-STREAM
             # with chunked encoding
             if block:
-                block = ("%x" % len(block)) + "\r\n" + block + "\r\n"
+                block = utf8("%x" % len(block)) + b("\r\n") + block + b("\r\n")
             if finishing:
-                block += "0\r\n\r\n"
+                block += b("0\r\n\r\n")
         return block
 
 
@@ -1612,15 +1671,9 @@ class URLSpec(object):
 
 url = URLSpec
 
-def _utf8(s):
-    if isinstance(s, unicode):
-        return s.encode("utf-8")
-    assert isinstance(s, str)
-    return s
-
 
 def _unicode(s):
-    if isinstance(s, str):
+    if isinstance(s, bytes_type):
         try:
             return s.decode("utf-8")
         except UnicodeDecodeError:
@@ -1633,8 +1686,12 @@ def _time_independent_equals(a, b):
     if len(a) != len(b):
         return False
     result = 0
-    for x, y in zip(a, b):
-        result |= ord(x) ^ ord(y)
+    if type(a[0]) is int:  # python3 byte strings
+        for x, y in zip(a,b):
+            result |= x ^ y
+    else:  # python2
+        for x, y in zip(a, b):
+            result |= ord(x) ^ ord(y)
     return result == 0
 
 

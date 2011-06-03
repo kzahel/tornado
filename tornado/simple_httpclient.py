@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 from __future__ import with_statement
 
-from cStringIO import StringIO
+from tornado.escape import utf8, _unicode, native_str
 from tornado.httpclient import HTTPRequest, HTTPResponse, HTTPError, AsyncHTTPClient
 from tornado.httputil import HTTPHeaders
 from tornado.ioloop import IOLoop
 from tornado.iostream import IOStream, SSLIOStream
 from tornado import stack_context
+from tornado.util import b
 
+import base64
 import collections
 import contextlib
 import copy
@@ -20,6 +22,11 @@ import socket
 import time
 import urlparse
 import zlib
+
+try:
+    from io import BytesIO  # python 3
+except ImportError:
+    from cStringIO import StringIO as BytesIO  # python 2
 
 try:
     import ssl # python 2.6+
@@ -126,14 +133,35 @@ class _HTTPConnection(object):
         # Timeout handle returned by IOLoop.add_timeout
         self._timeout = None
         with stack_context.StackContext(self.cleanup):
-            parsed = urlparse.urlsplit(self.request.url)
-            host = parsed.hostname
-            if parsed.port is None:
-                port = 443 if parsed.scheme == "https" else 80
+            parsed = urlparse.urlsplit(_unicode(self.request.url))
+            # urlsplit results have hostname and port results, but they
+            # didn't support ipv6 literals until python 2.7.
+            netloc = parsed.netloc
+            if "@" in netloc:
+                userpass, _, netloc = netloc.rpartition("@")
+            match = re.match(r'^(.+):(\d+)$', netloc)
+            if match:
+                host = match.group(1)
+                port = int(match.group(2))
             else:
-                port = parsed.port
+                host = netloc
+                port = 443 if parsed.scheme == "https" else 80
+            if re.match(r'^\[.*\]$', host):
+                # raw ipv6 addresses in urls are enclosed in brackets
+                host = host[1:-1]
             if self.client.hostname_mapping is not None:
                 host = self.client.hostname_mapping.get(host, host)
+
+            if request.allow_ipv6:
+                af = socket.AF_UNSPEC
+            else:
+                # We only try the first IP we get from getaddrinfo,
+                # so restrict to ipv4 by default.
+                af = socket.AF_INET
+
+            addrinfo = socket.getaddrinfo(host, port, af, socket.SOCK_STREAM,
+                                          0, 0)
+            af, socktype, proto, canonname, sockaddr = addrinfo[0]
 
             if parsed.scheme == "https":
                 ssl_options = {}
@@ -143,11 +171,11 @@ class _HTTPConnection(object):
                     ssl_options["ca_certs"] = request.ca_certs
                 else:
                     ssl_options["ca_certs"] = _DEFAULT_CA_CERTS
-                self.stream = SSLIOStream(socket.socket(),
+                self.stream = SSLIOStream(socket.socket(af, socktype, proto),
                                           io_loop=self.io_loop,
                                           ssl_options=ssl_options)
             else:
-                self.stream = IOStream(socket.socket(),
+                self.stream = IOStream(socket.socket(af, socktype, proto),
                                        io_loop=self.io_loop)
             timeout = min(request.connect_timeout, request.request_timeout)
             if timeout:
@@ -155,7 +183,7 @@ class _HTTPConnection(object):
                     self.start_time + timeout,
                     self._on_timeout)
             self.stream.set_close_callback(self._on_close)
-            self.stream.connect((host, port),
+            self.stream.connect(sockaddr,
                                 functools.partial(self._on_connect, parsed))
 
     def _on_timeout(self):
@@ -195,16 +223,16 @@ class _HTTPConnection(object):
             username = self.request.auth_username
             password = self.request.auth_password
         if username is not None:
-            auth = "%s:%s" % (username, password)
-            self.request.headers["Authorization"] = ("Basic %s" %
-                                                     auth.encode("base64").strip())
+            auth = utf8(username) + b(":") + utf8(password)
+            self.request.headers["Authorization"] = (b("Basic ") +
+                                                     base64.b64encode(auth))
         if self.request.user_agent:
             self.request.headers["User-Agent"] = self.request.user_agent
         has_body = self.request.method in ("POST", "PUT")
         if has_body:
             assert self.request.body is not None
-            self.request.headers["Content-Length"] = len(
-                self.request.body)
+            self.request.headers["Content-Length"] = str(len(
+                self.request.body))
         else:
             assert self.request.body is None
         if (self.request.method == "POST" and
@@ -214,14 +242,17 @@ class _HTTPConnection(object):
             self.request.headers["Accept-Encoding"] = "gzip"
         req_path = ((parsed.path or '/') +
                 (('?' + parsed.query) if parsed.query else ''))
-        request_lines = ["%s %s HTTP/1.1" % (self.request.method,
-                                             req_path)]
+        request_lines = [utf8("%s %s HTTP/1.1" % (self.request.method,
+                                                  req_path))]
         for k, v in self.request.headers.get_all():
-            request_lines.append("%s: %s" % (k, v))
-        self.stream.write("\r\n".join(request_lines) + "\r\n\r\n")
+            line = utf8(k) + b(": ") + utf8(v)
+            if b('\n') in line:
+                raise ValueError('Newline in header: ' + repr(line))
+            request_lines.append(line)
+        self.stream.write(b("\r\n").join(request_lines) + b("\r\n\r\n"))
         if has_body:
             self.stream.write(self.request.body)
-        self.stream.read_until("\r\n\r\n", self._on_headers)
+        self.stream.read_until(b("\r\n\r\n"), self._on_headers)
 
     @contextlib.contextmanager
     def cleanup(self):
@@ -242,8 +273,9 @@ class _HTTPConnection(object):
                                   error=HTTPError(599, "Connection closed")))
 
     def _on_headers(self, data):
+        data = native_str(data.decode("latin1"))
         first_line, _, header_data = data.partition("\r\n")
-        match = re.match("HTTP/1.[01] ([0-9]+) .*", first_line)
+        match = re.match("HTTP/1.[01] ([0-9]+)", first_line)
         assert match
         self.code = int(match.group(1))
         self.headers = HTTPHeaders.parse(header_data)
@@ -257,7 +289,7 @@ class _HTTPConnection(object):
             self._decompressor = zlib.decompressobj(16+zlib.MAX_WBITS)
         if self.headers.get("Transfer-Encoding") == "chunked":
             self.chunks = []
-            self.stream.read_until("\r\n", self._on_chunk_length)
+            self.stream.read_until(b("\r\n"), self._on_chunk_length)
         elif "Content-Length" in self.headers:
             self.stream.read_bytes(int(self.headers["Content-Length"]),
                                    self._on_body)
@@ -276,9 +308,9 @@ class _HTTPConnection(object):
                 # if chunks is not None, we already called streaming_callback
                 # in _on_chunk_data
                 self.request.streaming_callback(data)
-            buffer = StringIO()
+            buffer = BytesIO()
         else:
-            buffer = StringIO(data) # TODO: don't require one big string?
+            buffer = BytesIO(data) # TODO: don't require one big string?
         original_request = getattr(self.request, "original_request",
                                    self.request)
         if (self.request.follow_redirects and
@@ -307,13 +339,13 @@ class _HTTPConnection(object):
             # all the data has been decompressed, so we don't need to
             # decompress again in _on_body
             self._decompressor = None
-            self._on_body(''.join(self.chunks))
+            self._on_body(b('').join(self.chunks))
         else:
             self.stream.read_bytes(length + 2,  # chunk ends with \r\n
                               self._on_chunk_data)
 
     def _on_chunk_data(self, data):
-        assert data[-2:] == "\r\n"
+        assert data[-2:] == b("\r\n")
         chunk = data[:-2]
         if self._decompressor:
             chunk = self._decompressor.decompress(chunk)
@@ -321,7 +353,7 @@ class _HTTPConnection(object):
             self.request.streaming_callback(chunk)
         else:
             self.chunks.append(chunk)
-        self.stream.read_until("\r\n", self._on_chunk_length)
+        self.stream.read_until(b("\r\n"), self._on_chunk_length)
 
 
 # match_hostname was added to the standard library ssl module in python 3.2.

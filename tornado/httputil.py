@@ -16,6 +16,7 @@
 
 """HTTP utility code shared by clients and servers."""
 
+import urllib
 import re
 
 class HTTPHeaders(dict):
@@ -128,6 +129,8 @@ class HTTPHeaders(dict):
             self[k] = v
 
     _NORMALIZED_HEADER_RE = re.compile(r'^[A-Z0-9][a-z0-9]*(-[A-Z0-9][a-z0-9]*)*$')
+    _normalized_headers = {}
+
     @staticmethod
     def _normalize_name(name):
         """Converts a name to Http-Header-Case.
@@ -135,9 +138,28 @@ class HTTPHeaders(dict):
         >>> HTTPHeaders._normalize_name("coNtent-TYPE")
         'Content-Type'
         """
-        if HTTPHeaders._NORMALIZED_HEADER_RE.match(name):
-            return name
-        return "-".join([w.capitalize() for w in name.split("-")])
+        try:
+            return HTTPHeaders._normalized_headers[name]
+        except KeyError:
+            if HTTPHeaders._NORMALIZED_HEADER_RE.match(name):
+                normalized = name
+            else:
+                normalized = "-".join([w.capitalize() for w in name.split("-")])
+            HTTPHeaders._normalized_headers[name] = normalized
+            return normalized
+
+
+def url_concat(url, args):
+    """Concatenate url and argument dictionary regardless of whether
+    url has existing query parameters.
+
+    >>> url_concat("http://example.com/foo?a=b", dict(c="d"))
+    'http://example.com/foo?a=b&c=d'
+    """
+    if not args: return url
+    if url[-1] not in ('?', '&'):
+        url += '&' if ('?' in url) else '?'
+    return url + urllib.urlencode(args)
 
 
 def doctests():

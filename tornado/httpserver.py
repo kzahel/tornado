@@ -16,7 +16,6 @@
 
 """A non-blocking, single-threaded HTTP server."""
 
-import cgi
 import errno
 import logging
 import os
@@ -24,10 +23,12 @@ import socket
 import time
 import urlparse
 
+from tornado.escape import utf8, native_str, parse_qs_bytes
 from tornado import httputil
 from tornado import ioloop
 from tornado import iostream
 from tornado import stack_context
+from tornado.util import b, bytes_type
 
 try:
     import fcntl
@@ -140,7 +141,7 @@ class HTTPServer(object):
         self.io_loop = io_loop
         self.xheaders = xheaders
         self.ssl_options = ssl_options
-        self._socket = None
+        self._sockets = {}  # fd -> socket object
         self._started = False
 
     def listen(self, port, address=""):
@@ -155,22 +156,50 @@ class HTTPServer(object):
         self.bind(port, address)
         self.start(1)
 
-    def bind(self, port, address=""):
-        """Binds this server to the given port on the given IP address.
+    def bind(self, port, address=None, family=socket.AF_UNSPEC):
+        """Binds this server to the given port on the given address.
 
         To start the server, call start(). If you want to run this server
         in a single process, you can call listen() as a shortcut to the
         sequence of bind() and start() calls.
+
+        Address may be either an IP address or hostname.  If it's a hostname,
+        the server will listen on all IP addresses associated with the
+        name.  Address may be an empty string or None to listen on all
+        available interfaces.  Family may be set to either socket.AF_INET
+        or socket.AF_INET6 to restrict to ipv4 or ipv6 addresses, otherwise
+        both will be used if available.
+
+        This method may be called multiple times prior to start() to listen
+        on multiple ports or interfaces.
         """
-        assert not self._socket
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
-        flags = fcntl.fcntl(self._socket.fileno(), fcntl.F_GETFD)
-        flags |= fcntl.FD_CLOEXEC
-        fcntl.fcntl(self._socket.fileno(), fcntl.F_SETFD, flags)
-        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._socket.setblocking(0)
-        self._socket.bind((address, port))
-        self._socket.listen(128)
+        if address == "":
+            address = None
+        success = 0
+        for res in socket.getaddrinfo(address, port, family, socket.SOCK_STREAM,
+                                      0, socket.AI_PASSIVE | socket.AI_ADDRCONFIG):
+            af, socktype, proto, canonname, sockaddr = res
+            sock = socket.socket(af, socktype, proto)
+            flags = fcntl.fcntl(sock.fileno(), fcntl.F_GETFD)
+            flags |= fcntl.FD_CLOEXEC
+            fcntl.fcntl(sock.fileno(), fcntl.F_SETFD, flags)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if af == socket.AF_INET6:
+                # On linux, ipv6 sockets accept ipv4 too by default,
+                # but this makes it impossible to bind to both
+                # 0.0.0.0 in ipv4 and :: in ipv6.  On other systems,
+                # separate sockets *must* be used to listen for both ipv4
+                # and ipv6.  For consistency, always disable ipv4 on our
+                # ipv6 sockets and use a separate ipv4 socket when needed.
+                #
+                # Python 2.x on windows doesn't have IPPROTO_IPV6.
+                if hasattr(socket, "IPPROTO_IPV6"):
+                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            sock.setblocking(0)
+            sock.bind(sockaddr)
+            sock.listen(128)
+            self._sockets[sock.fileno()] = sock
+            success += 1
 
     def start(self, num_processes=1):
         """Starts this server in the IOLoop.
@@ -216,26 +245,27 @@ class HTTPServer(object):
                         seed(int(time.time() * 1000) ^ os.getpid())
                     random.seed(seed)
                     self.io_loop = ioloop.IOLoop.instance()
-                    self.io_loop.add_handler(
-                        self._socket.fileno(), self._handle_events,
-                        ioloop.IOLoop.READ)
+                    for fd in self._sockets.keys():
+                        self.io_loop.add_handler(fd, self._handle_events,
+                                                 ioloop.IOLoop.READ)
                     return
             os.waitpid(-1, 0)
         else:
             if not self.io_loop:
                 self.io_loop = ioloop.IOLoop.instance()
-            self.io_loop.add_handler(self._socket.fileno(),
-                                     self._handle_events,
-                                     ioloop.IOLoop.READ)
+            for fd in self._sockets.keys():
+                self.io_loop.add_handler(fd, self._handle_events,
+                                         ioloop.IOLoop.READ)
 
     def stop(self):
-        self.io_loop.remove_handler(self._socket.fileno())
-        self._socket.close()
+        for fd, sock in self._sockets.iteritems():
+            self.io_loop.remove_handler(fd)
+            sock.close()
 
     def _handle_events(self, fd, events):
         while True:
             try:
-                connection, address = self._socket.accept()
+                connection, address = self._sockets[fd].accept()
             except socket.error, e:
                 if e.args[0] in (errno.EWOULDBLOCK, errno.EAGAIN):
                     return
@@ -289,7 +319,7 @@ class HTTPConnection(object):
         # Save stack context here, outside of any request.  This keeps
         # contexts from one request from leaking into the next.
         self._header_callback = stack_context.wrap(self._on_headers)
-        self.stream.read_until("\r\n\r\n", self._header_callback)
+        self.stream.read_until(b("\r\n\r\n"), self._header_callback)
 
     def write(self, chunk):
         assert self._request, "Request closed"
@@ -323,10 +353,11 @@ class HTTPConnection(object):
         if disconnect:
             self.stream.close()
             return
-        self.stream.read_until("\r\n\r\n", self._header_callback)
+        self.stream.read_until(b("\r\n\r\n"), self._header_callback)
 
     def _on_headers(self, data):
         try:
+            data = native_str(data.decode('latin1'))
             eol = data.find("\r\n")
             start_line = data[:eol]
             try:
@@ -362,7 +393,7 @@ class HTTPConnection(object):
         content_type = self._request.headers.get("Content-Type", "")
         if self._request.method in ("POST", "PUT"):
             if content_type.startswith("application/x-www-form-urlencoded"):
-                arguments = cgi.parse_qs(self._request.body)
+                arguments = parse_qs_bytes(native_str(self._request.body))
                 for name, values in arguments.iteritems():
                     values = [v for v in values if v]
                     if values:
@@ -373,7 +404,7 @@ class HTTPConnection(object):
                 for field in fields:
                     k, sep, v = field.strip().partition("=")
                     if k == "boundary" and v:
-                        self._parse_mime_body(v, data)
+                        self._parse_mime_body(utf8(v), data)
                         break
                 else:
                     logging.warning("Invalid multipart/form-data")
@@ -385,30 +416,30 @@ class HTTPConnection(object):
         # xmpp).  I think we're also supposed to handle backslash-escapes
         # here but I'll save that until we see a client that uses them
         # in the wild.
-        if boundary.startswith('"') and boundary.endswith('"'):
+        if boundary.startswith(b('"')) and boundary.endswith(b('"')):
             boundary = boundary[1:-1]
-        if data.endswith("\r\n"):
+        if data.endswith(b("\r\n")):
             footer_length = len(boundary) + 6
         else:
             footer_length = len(boundary) + 4
-        parts = data[:-footer_length].split("--" + boundary + "\r\n")
+        parts = data[:-footer_length].split(b("--") + boundary + b("\r\n"))
         for part in parts:
             if not part: continue
-            eoh = part.find("\r\n\r\n")
+            eoh = part.find(b("\r\n\r\n"))
             if eoh == -1:
                 logging.warning("multipart/form-data missing headers")
                 continue
-            headers = httputil.HTTPHeaders.parse(part[:eoh])
+            headers = httputil.HTTPHeaders.parse(part[:eoh].decode("utf-8"))
             name_header = headers.get("Content-Disposition", "")
             if not name_header.startswith("form-data;") or \
-               not part.endswith("\r\n"):
+               not part.endswith(b("\r\n")):
                 logging.warning("Invalid multipart/form-data")
                 continue
             value = part[eoh + 4:-2]
             name_values = {}
             for name_part in name_header[10:].split(";"):
                 name, name_value = name_part.strip().split("=", 1)
-                name_values[name] = name_value.strip('"').decode("utf-8")
+                name_values[name] = name_value.strip('"')
             if not name_values.get("name"):
                 logging.warning("multipart/form-data value missing name")
                 continue
@@ -472,10 +503,10 @@ class HTTPRequest(object):
         self._start_time = time.time()
         self._finish_time = None
 
-        scheme, netloc, path, query, fragment = urlparse.urlsplit(uri)
+        scheme, netloc, path, query, fragment = urlparse.urlsplit(native_str(uri))
         self.path = path
         self.query = query
-        arguments = cgi.parse_qs(query)
+        arguments = parse_qs_bytes(query)
         self.arguments = {}
         for name, values in arguments.iteritems():
             values = [v for v in values if v]
@@ -487,7 +518,7 @@ class HTTPRequest(object):
 
     def write(self, chunk):
         """Writes the given chunk to the response stream."""
-        assert isinstance(chunk, str)
+        assert isinstance(chunk, bytes_type)
         self.connection.write(chunk)
 
     def finish(self):

@@ -55,6 +55,8 @@ import re
 import sys
 import time
 
+from tornado.escape import _unicode
+
 # For pretty log messages, if available
 try:
     import curses
@@ -62,14 +64,14 @@ except:
     curses = None
 
 
-def define(name, default=None, type=str, help=None, metavar=None,
+def define(name, default=None, type=None, help=None, metavar=None,
            multiple=False):
     """Defines a new command line option.
 
-    If type is given (one of str, float, int, datetime, or timedelta),
-    we parse the command line arguments based on the given type. If
-    multiple is True, we accept comma-separated values, and the option
-    value is always a list.
+    If type is given (one of str, float, int, datetime, or timedelta)
+    or can be inferred from the default, we parse the command line
+    arguments based on the given type. If multiple is True, we accept
+    comma-separated values, and the option value is always a list.
 
     For multi-value integers, we also accept the syntax x:y, which
     turns into range(x, y) - very useful for long integer ranges.
@@ -90,6 +92,11 @@ def define(name, default=None, type=str, help=None, metavar=None,
     options_file = frame.f_code.co_filename
     file_name = frame.f_back.f_code.co_filename
     if file_name == options_file: file_name = ""
+    if type is None:
+        if not multiple and default is not None:
+            type = default.__class__
+        else:
+            type = str
     options[name] = _Option(name, file_name=file_name, default=default,
                             type=type, help=help, metavar=metavar,
                             multiple=multiple)
@@ -295,7 +302,7 @@ class _Option(object):
         return value.lower() not in ("false", "0", "f")
 
     def _parse_string(self, value):
-        return value.decode("utf-8")
+        return _unicode(value)
 
 
 class Error(Exception):
