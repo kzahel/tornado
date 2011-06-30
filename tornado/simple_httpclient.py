@@ -255,6 +255,7 @@ class _HTTPConnection(object):
             if b('\n') in line:
                 raise ValueError('Newline in header: ' + repr(line))
             request_lines.append(line)
+        self.request_start_time = time.time()
         self.stream.write(b("\r\n").join(request_lines) + b("\r\n\r\n"))
         if has_body:
             self.stream.write(self.request.body)
@@ -334,6 +335,7 @@ class _HTTPConnection(object):
         response = HTTPResponse(original_request,
                                 self.code, headers=self.headers,
                                 buffer=buffer,
+                                request_time=time.time()-self.request_start_time,
                                 effective_url=self.request.url)
         self.callback(response)
         self.callback = None
