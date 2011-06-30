@@ -122,6 +122,7 @@ class IOStream(object):
         except socket.error, e:
             # In non-blocking mode connect() always raises an exception
             if e.args[0] not in (errno.EINPROGRESS, errno.EWOULDBLOCK):
+                logging.error('error connecting %s' % e)
                 raise
         self._connect_callback = stack_context.wrap(callback)
         self._add_io_state(self.io_loop.WRITE)
@@ -323,9 +324,10 @@ class IOStream(object):
         try:
             chunk = self._read_from_socket()
         except socket.error, e:
-            # ssl.SSLError is a subclass of socket.error
-            logging.warning("Read error on %d: %s",
-                            self.socket.fileno(), e)
+            if e.args[0] not in [errno.ECONNREFUSED]:
+                # ssl.SSLError is a subclass of socket.error
+                logging.warning("Read error on %d: %s",
+                                self.socket.fileno(), e)
             self.close()
             raise
         if chunk is None:

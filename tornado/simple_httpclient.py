@@ -18,6 +18,7 @@ import logging
 import os.path
 import re
 import socket
+import errno
 import time
 import urlparse
 import zlib
@@ -264,7 +265,8 @@ class _HTTPConnection(object):
         try:
             yield
         except Exception, e:
-            logging.warning("uncaught exception", exc_info=True)
+            if e.args[0] not in [errno.ECONNREFUSED]:
+                logging.warning("uncaught exception", exc_info=True)
             if self.callback is not None:
                 callback = self.callback
                 self.callback = None
