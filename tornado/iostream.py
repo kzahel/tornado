@@ -20,7 +20,6 @@ from __future__ import with_statement
 
 import collections
 import errno
-import functools
 import logging
 import socket
 import sys
@@ -35,7 +34,7 @@ except ImportError:
     ssl = None
 
 class IOStream(object):
-    """A utility class to write to and read from a non-blocking socket.
+    r"""A utility class to write to and read from a non-blocking socket.
 
     We support three methods: write(), read_until(), and read_bytes().
     All of the methods take callbacks (since writing and reading are
@@ -49,7 +48,7 @@ class IOStream(object):
     and may either be connected before passing it to the IOStream or
     connected with IOStream.connect.
 
-    A very simple (and broken) HTTP client using this class:
+    A very simple (and broken) HTTP client using this class::
 
         from tornado import ioloop
         from tornado import iostream
@@ -87,9 +86,11 @@ class IOStream(object):
         self.read_chunk_size = read_chunk_size
         self._read_buffer = collections.deque()
         self._write_buffer = collections.deque()
+        self._read_buffer_size = 0
         self._write_buffer_frozen = False
         self._read_delimiter = None
         self._read_bytes = None
+        self._read_until_close = False
         self._read_callback = None
         self._write_callback = None
         self._close_callback = None
@@ -142,9 +143,6 @@ class IOStream(object):
     def read_bytes(self, num_bytes, callback):
         """Call callback when we read the given number of bytes."""
         assert not self._read_callback, "Already reading"
-        if num_bytes == 0:
-            callback(b(""))
-            return
         self._read_bytes = num_bytes
         self._read_callback = stack_context.wrap(callback)
         while True:
@@ -153,6 +151,19 @@ class IOStream(object):
             self._check_closed()
             if self._read_to_buffer() == 0:
                 break
+        self._add_io_state(self.io_loop.READ)
+
+    def read_until_close(self, callback):
+        """Reads all data from the socket until it is closed.
+
+        Subject to ``max_buffer_size`` limit from `IOStream` constructor.
+        """
+        assert not self._read_callback, "Already reading"
+        if self.closed():
+            self._run_callback(callback, self._consume(self._read_buffer_size))
+            return
+        self._read_until_close = True
+        self._read_callback = stack_context.wrap(callback)
         self._add_io_state(self.io_loop.READ)
 
     def write(self, data, callback=None):
@@ -176,6 +187,12 @@ class IOStream(object):
     def close(self):
         """Close this stream."""
         if self.socket is not None:
+            if self._read_until_close:
+                callback = self._read_callback
+                self._read_callback = None
+                self._read_until_close = False
+                self._run_callback(callback,
+                                   self._consume(self._read_buffer_size))
             self.io_loop.remove_handler(self.socket.fileno())
             self.socket.close()
             self.socket = None
@@ -191,6 +208,7 @@ class IOStream(object):
         return bool(self._write_buffer)
 
     def closed(self):
+        """Returns true if the stream has been closed."""
         return self.socket is None
 
     def _handle_events(self, fd, events):
@@ -222,7 +240,7 @@ class IOStream(object):
             if state != self._state:
                 self._state = state
                 self.io_loop.update_handler(self.socket.fileno(), self._state)
-        except:
+        except Exception:
             logging.error("Uncaught exception, closing connection.",
                           exc_info=True)
             self.close()
@@ -232,7 +250,7 @@ class IOStream(object):
         def wrapper():
             try:
                 callback(*args)
-            except:
+            except Exception:
                 logging.error("Uncaught exception, closing connection.",
                               exc_info=True)
                 # Close the socket on an uncaught exception from a user callback
@@ -313,7 +331,8 @@ class IOStream(object):
         if chunk is None:
             return 0
         self._read_buffer.append(chunk)
-        if self._read_buffer_size() >= self.max_buffer_size:
+        self._read_buffer_size += len(chunk)
+        if self._read_buffer_size >= self.max_buffer_size:
             logging.error("Reached maximum read buffer size")
             self.close()
             raise IOError("Reached maximum read buffer size")
@@ -324,15 +343,15 @@ class IOStream(object):
 
         Returns True if the read was completed.
         """
-        if self._read_bytes:
-            if self._read_buffer_size() >= self._read_bytes:
+        if self._read_bytes is not None:
+            if self._read_buffer_size >= self._read_bytes:
                 num_bytes = self._read_bytes
                 callback = self._read_callback
                 self._read_callback = None
                 self._read_bytes = None
                 self._run_callback(callback, self._consume(num_bytes))
                 return True
-        elif self._read_delimiter:
+        elif self._read_delimiter is not None:
             _merge_prefix(self._read_buffer, sys.maxint)
             loc = self._read_buffer[0].find(self._read_delimiter)
             if loc != -1:
@@ -392,7 +411,10 @@ class IOStream(object):
             self._run_callback(callback)
 
     def _consume(self, loc):
+        if loc == 0:
+            return b("")
         _merge_prefix(self._read_buffer, loc)
+        self._read_buffer_size -= loc
         return self._read_buffer.popleft()
 
     def _check_closed(self):
@@ -407,16 +429,15 @@ class IOStream(object):
             self._state = self._state | state
             self.io_loop.update_handler(self.socket.fileno(), self._state)
 
-    def _read_buffer_size(self):
-        return sum(len(chunk) for chunk in self._read_buffer)
-
 
 class SSLIOStream(IOStream):
-    """A utility class to write to and read from a non-blocking socket.
+    """A utility class to write to and read from a non-blocking SSL socket.
 
     If the socket passed to the constructor is already connected,
-    it should be wrapped with
+    it should be wrapped with::
+
         ssl.wrap_socket(sock, do_handshake_on_connect=False, **kwargs)
+
     before constructing the SSLIOStream.  Unconnected sockets will be
     wrapped when IOStream.connect is finished.
     """

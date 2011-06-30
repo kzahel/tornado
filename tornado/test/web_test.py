@@ -1,5 +1,6 @@
 from tornado.escape import json_decode, utf8, to_unicode, recursive_unicode, native_str
 from tornado.iostream import IOStream
+from tornado.template import DictLoader
 from tornado.testing import LogTrapTestCase, AsyncHTTPTestCase
 from tornado.util import b, bytes_type
 from tornado.web import RequestHandler, _O, authenticated, Application, asynchronous, url
@@ -8,7 +9,6 @@ import binascii
 import logging
 import re
 import socket
-import tornado.ioloop
 
 class CookieTestRequestHandler(RequestHandler):
     # stub out enough methods to make the secure_cookie functions work
@@ -65,9 +65,18 @@ class CookieTest(AsyncHTTPTestCase, LogTrapTestCase):
             def get(self):
                 self.write(self.get_cookie("foo"))
 
+        class SetCookieDomainHandler(RequestHandler):
+            def get(self):
+                # unicode domain and path arguments shouldn't break things
+                # either (see bug #285)
+                self.set_cookie("unicode_args", "blah", domain=u"foo.com",
+                                path=u"/foo")
+
+
         return Application([
                 ("/set", SetCookieHandler),
-                ("/get", GetCookieHandler)])
+                ("/get", GetCookieHandler),
+                ("/set_domain", SetCookieDomainHandler)])
 
     def test_set_cookie(self):
         response = self.fetch("/set")
@@ -79,6 +88,11 @@ class CookieTest(AsyncHTTPTestCase, LogTrapTestCase):
     def test_get_cookie(self):
         response = self.fetch("/get", headers={"Cookie": "foo=bar"})
         self.assertEqual(response.body, b("bar"))
+
+    def test_set_cookie_domain(self):
+        response = self.fetch("/set_domain")
+        self.assertEqual(response.headers.get_list("Set-Cookie"),
+                         ["unicode_args=blah; Domain=foo.com; Path=/foo"])
 
 class AuthRedirectRequestHandler(RequestHandler):
     def initialize(self, login_url):
@@ -236,13 +250,48 @@ class DecodeArgHandler(RequestHandler):
                     'query': describe(self.get_argument("foo")),
                     })
 
+class LinkifyHandler(RequestHandler):
+    def get(self):
+        self.render("linkify.html", message="http://example.com")
+
+class UIModuleResourceHandler(RequestHandler):
+    def get(self):
+        self.render("page.html", entries=[1,2])
+
+class OptionalPathHandler(RequestHandler):
+    def get(self, path):
+        self.write({"path": path})
+
 class WebTest(AsyncHTTPTestCase, LogTrapTestCase):
     def get_app(self):
-        return Application([
-                url("/typecheck/(.*)", TypeCheckHandler, name='typecheck'),
-                url("/decode_arg/(.*)", DecodeArgHandler),
-                url("/decode_arg_kw/(?P<arg>.*)", DecodeArgHandler),
-                ])
+        loader = DictLoader({
+                "linkify.html": "{% module linkify(message) %}",
+                "page.html": """\
+<html><head></head><body>
+{% for e in entries %}
+{% module Template("entry.html", entry=e) %}
+{% end %}
+</body></html>""",
+                "entry.html": """\
+{{ set_resources(embedded_css=".entry { margin-bottom: 1em; }", embedded_javascript="js_embed()", css_files=["/base.css", "/foo.css"], javascript_files="/common.js", html_head="<meta>", html_body='<script src="/analytics.js"/>') }}
+<div class="entry">...</div>""",
+                })
+        urls = [
+            url("/typecheck/(.*)", TypeCheckHandler, name='typecheck'),
+            url("/decode_arg/(.*)", DecodeArgHandler),
+            url("/decode_arg_kw/(?P<arg>.*)", DecodeArgHandler),
+            url("/linkify", LinkifyHandler),
+            url("/uimodule_resources", UIModuleResourceHandler),
+            url("/optional_path/(.+)?", OptionalPathHandler),
+            ]
+        return Application(urls,
+                           template_loader=loader,
+                           autoescape="xhtml_escape")
+
+    def fetch_json(self, *args, **kwargs):
+        response = self.fetch(*args, **kwargs)
+        response.rethrow()
+        return json_decode(response.body)
 
     def test_types(self):
         response = self.fetch("/typecheck/asdf?foo=bar",
@@ -274,3 +323,39 @@ class WebTest(AsyncHTTPTestCase, LogTrapTestCase):
         self.assertEqual(data, {u'path': [u'bytes', u'c3a9'],
                                 u'query': [u'bytes', u'c3a9'],
                                 })
+
+    def test_uimodule_unescaped(self):
+        response = self.fetch("/linkify")
+        self.assertEqual(response.body,
+                         b("<a href=\"http://example.com\">http://example.com</a>"))
+
+    def test_uimodule_resources(self):
+        response = self.fetch("/uimodule_resources")
+        self.assertEqual(response.body, b("""\
+<html><head><link href="/base.css" type="text/css" rel="stylesheet"/><link href="/foo.css" type="text/css" rel="stylesheet"/>
+<style type="text/css">
+.entry { margin-bottom: 1em; }
+</style>
+<meta>
+</head><body>
+
+
+<div class="entry">...</div>
+
+
+<div class="entry">...</div>
+
+<script src="/common.js" type="text/javascript"></script>
+<script type="text/javascript">
+//<![CDATA[
+js_embed()
+//]]>
+</script>
+<script src="/analytics.js"/>
+</body></html>"""))
+
+    def test_optional_path(self):
+        self.assertEqual(self.fetch_json("/optional_path/foo"),
+                         {u"path": u"foo"})
+        self.assertEqual(self.fetch_json("/optional_path/"),
+                         {u"path": None})

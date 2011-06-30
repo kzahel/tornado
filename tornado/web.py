@@ -14,14 +14,13 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""The Tornado web framework.
-
+"""
 The Tornado web framework looks a bit like web.py (http://webpy.org/) or
 Google's webapp (http://code.google.com/appengine/docs/python/tools/webapp/),
 but with additional tools and optimizations to take advantage of the
 Tornado non-blocking web server and tools.
 
-Here is the canonical "Hello, world" example app:
+Here is the canonical "Hello, world" example app::
 
     import tornado.ioloop
     import tornado.web
@@ -40,7 +39,8 @@ Here is the canonical "Hello, world" example app:
 See the Tornado walkthrough on http://tornadoweb.org for more details
 and a good getting started guide.
 
-Thread-safety notes:
+Thread-safety notes
+-------------------
 
 In general, methods on RequestHandler and elsewhere in tornado are not
 thread-safe.  In particular, methods such as write(), finish(), and
@@ -55,7 +55,6 @@ import Cookie
 import base64
 import binascii
 import calendar
-import contextlib
 import datetime
 import email.utils
 import functools
@@ -80,7 +79,7 @@ from tornado import escape
 from tornado import locale
 from tornado import stack_context
 from tornado import template
-from tornado.escape import utf8
+from tornado.escape import utf8, _unicode
 from tornado.util import b, bytes_type
 
 try:
@@ -121,7 +120,8 @@ class RequestHandler(object):
         A dictionary passed as the third argument of a url spec will be
         supplied as keyword arguments to initialize().
 
-        Example:
+        Example::
+
             class ProfileHandler(RequestHandler):
                 def initialize(self, database):
                     self.database = database
@@ -137,6 +137,7 @@ class RequestHandler(object):
 
     @property
     def settings(self):
+        """An alias for `self.application.settings`."""
         return self.application.settings
 
     def head(self, *args, **kwargs):
@@ -285,7 +286,7 @@ class RequestHandler(object):
                 try:
                     self._cookies.load(
                         escape.native_str(self.request.headers["Cookie"]))
-                except:
+                except Exception:
                     self.clear_all_cookies()
         return self._cookies
 
@@ -343,11 +344,15 @@ class RequestHandler(object):
     def set_secure_cookie(self, name, value, expires_days=30, **kwargs):
         """Signs and timestamps a cookie so it cannot be forged.
 
-        You must specify the 'cookie_secret' setting in your Application
+        You must specify the ``cookie_secret`` setting in your Application
         to use this method. It should be a long, random sequence of bytes
         to be used as the HMAC secret for the signature.
 
-        To read a cookie set with this method, use get_secure_cookie().
+        To read a cookie set with this method, use `get_secure_cookie()`.
+
+        Note that the ``expires_days`` parameter sets the lifetime of the
+        cookie in the browser, but is independent of the ``max_age_days``
+        parameter to `get_secure_cookie`.
         """
         self.set_cookie(name, self.create_signed_value(name, value),
                         expires_days=expires_days, **kwargs)
@@ -365,29 +370,18 @@ class RequestHandler(object):
         value = b("|").join([value, timestamp, signature])
         return value
 
-    def get_secure_cookie(self, name, include_name=True, value=None):
-        """Returns the given signed cookie if it validates, or None.
-
-        In older versions of Tornado (0.1 and 0.2), we did not include the
-        name of the cookie in the cookie signature. To read these old-style
-        cookies, pass include_name=False to this method. Otherwise, all
-        attempts to read old-style cookies will fail (and you may log all
-        your users out whose cookies were written with a previous Tornado
-        version).
-        """
+    def get_secure_cookie(self, name, value=None, max_age_days=31):
+        """Returns the given signed cookie if it validates, or None."""
         if value is None: value = self.get_cookie(name)
         if not value: return None
         parts = utf8(value).split(b("|"))
         if len(parts) != 3: return None
-        if include_name:
-            signature = self._cookie_signature(name, parts[0], parts[1])
-        else:
-            signature = self._cookie_signature(parts[0], parts[1])
+        signature = self._cookie_signature(name, parts[0], parts[1])
         if not _time_independent_equals(parts[2], signature):
             logging.warning("Invalid cookie signature %r", value)
             return None
         timestamp = int(parts[1])
-        if timestamp < time.time() - 31 * 86400:
+        if timestamp < time.time() - max_age_days * 86400:
             logging.warning("Expired cookie %r", value)
             return None
         if timestamp > time.time() + 31 * 86400:
@@ -402,7 +396,7 @@ class RequestHandler(object):
             logging.warning("Tampered cookie %r", value)
         try:
             return base64.b64decode(parts[0])
-        except:
+        except Exception:
             return None
 
     def _cookie_signature(self, *parts):
@@ -492,13 +486,13 @@ class RequestHandler(object):
             js = ''.join('<script src="' + escape.xhtml_escape(p) +
                          '" type="text/javascript"></script>'
                          for p in paths)
-            sloc = html.rindex('</body>')
-            html = html[:sloc] + js + '\n' + html[sloc:]
+            sloc = html.rindex(b('</body>'))
+            html = html[:sloc] + utf8(js) + b('\n') + html[sloc:]
         if js_embed:
-            js = '<script type="text/javascript">\n//<![CDATA[\n' + \
-                '\n'.join(js_embed) + '\n//]]>\n</script>'
-            sloc = html.rindex('</body>')
-            html = html[:sloc] + js + '\n' + html[sloc:]
+            js = b('<script type="text/javascript">\n//<![CDATA[\n') + \
+                b('\n').join(js_embed) + b('\n//]]>\n</script>')
+            sloc = html.rindex(b('</body>'))
+            html = html[:sloc] + js + b('\n') + html[sloc:]
         if css_files:
             paths = []
             unique_paths = set()
@@ -511,19 +505,19 @@ class RequestHandler(object):
             css = ''.join('<link href="' + escape.xhtml_escape(p) + '" '
                           'type="text/css" rel="stylesheet"/>'
                           for p in paths)
-            hloc = html.index('</head>')
-            html = html[:hloc] + css + '\n' + html[hloc:]
+            hloc = html.index(b('</head>'))
+            html = html[:hloc] + utf8(css) + b('\n') + html[hloc:]
         if css_embed:
-            css = '<style type="text/css">\n' + '\n'.join(css_embed) + \
-                '\n</style>'
-            hloc = html.index('</head>')
-            html = html[:hloc] + css + '\n' + html[hloc:]
+            css = b('<style type="text/css">\n') + b('\n').join(css_embed) + \
+                b('\n</style>')
+            hloc = html.index(b('</head>'))
+            html = html[:hloc] + css + b('\n') + html[hloc:]
         if html_heads:
-            hloc = html.index('</head>')
-            html = html[:hloc] + ''.join(html_heads) + '\n' + html[hloc:]
+            hloc = html.index(b('</head>'))
+            html = html[:hloc] + b('').join(html_heads) + b('\n') + html[hloc:]
         if html_bodies:
-            hloc = html.index('</body>')
-            html = html[:hloc] + ''.join(html_bodies) + '\n' + html[hloc:]
+            hloc = html.index(b('</body>'))
+            html = html[:hloc] + b('').join(html_bodies) + b('\n') + html[hloc:]
         self.finish(html)
 
     def render_string(self, template_name, **kwargs):
@@ -843,7 +837,7 @@ class RequestHandler(object):
                 f = open(abs_path, "rb")
                 hashes[abs_path] = hashlib.md5(f.read()).hexdigest()
                 f.close()
-            except:
+            except Exception:
                 logging.error("Could not open static file %r", path)
                 hashes[abs_path] = None
         base = self.request.protocol + "://" + self.request.host \
@@ -881,6 +875,7 @@ class RequestHandler(object):
                             "application to use %s" % (name, feature))
 
     def reverse_url(self, name, *args):
+        """Alias for `Application.reverse_url`."""
         return self.application.reverse_url(name, *args)
 
     def compute_etag(self):
@@ -901,7 +896,7 @@ class RequestHandler(object):
             # so re-raise the exception to ensure that it's in
             # sys.exc_info()
             raise type, value, traceback
-        except:
+        except Exception:
             self._handle_request_exception(value)
         return True
 
@@ -985,7 +980,7 @@ def asynchronous(method):
     If this decorator is given, the response is not finished when the
     method returns. It is up to the request handler to call self.finish()
     to finish the HTTP request. Without this decorator, the request is
-    automatically finished when the get() or post() method returns.
+    automatically finished when the get() or post() method returns. ::
 
        class MyRequestHandler(web.RequestHandler):
            @web.asynchronous
@@ -1010,9 +1005,9 @@ def asynchronous(method):
 def removeslash(method):
     """Use this decorator to remove trailing slashes from the request path.
 
-    For example, a request to '/foo/' would redirect to '/foo' with this
+    For example, a request to ``'/foo/'`` would redirect to ``'/foo'`` with this
     decorator. Your request handler mapping should use a regular expression
-    like r'/foo/*' in conjunction with using the decorator.
+    like ``r'/foo/*'`` in conjunction with using the decorator.
     """
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -1053,7 +1048,7 @@ class Application(object):
     """A collection of request handlers that make up a web application.
 
     Instances of this class are callable and can be passed directly to
-    HTTPServer to serve the application:
+    HTTPServer to serve the application::
 
         application = web.Application([
             (r"/", MainPageHandler),
@@ -1070,14 +1065,14 @@ class Application(object):
     Each tuple can contain an optional third element, which should be a
     dictionary if it is present. That dictionary is passed as keyword
     arguments to the contructor of the handler. This pattern is used
-    for the StaticFileHandler below:
+    for the StaticFileHandler below::
 
         application = web.Application([
             (r"/static/(.*)", web.StaticFileHandler, {"path": "/var/www"}),
         ])
 
     We support virtual hosts with the add_handlers method, which takes in
-    a host regular expression as the first argument:
+    a host regular expression as the first argument::
 
         application.add_handlers(r"www\.myhost\.com", [
             (r"/article/([0-9]+)", ArticleHandler),
@@ -1087,6 +1082,12 @@ class Application(object):
     keyword argument. We will serve those files from the /static/ URI
     (this is configurable with the static_url_prefix setting),
     and we will serve /favicon.ico and /robots.txt from the same directory.
+
+    .. attribute:: settings
+
+       Additonal keyword arguments passed to the constructor are saved in the
+       `settings` dictionary, and are often referred to in documentation as
+       "application settings".
     """
     def __init__(self, handlers=None, default_host="", transforms=None,
                  wsgi=False, **settings):
@@ -1101,7 +1102,10 @@ class Application(object):
         self.named_handlers = {}
         self.default_host = default_host
         self.settings = settings
-        self.ui_modules = {}
+        self.ui_modules = {'linkify': _linkify,
+                           'xsrf_form_html': _xsrf_form_html,
+                           'Template': TemplateModule,
+                           }
         self.ui_methods = {}
         self._wsgi = wsgi
         self._load_ui_modules(settings.get("ui_modules", {}))
@@ -1331,7 +1335,7 @@ class ErrorHandler(RequestHandler):
 class RedirectHandler(RequestHandler):
     """Redirects the client to the given URL for all GET requests.
 
-    You should provide the keyword argument "url" to the handler, e.g.:
+    You should provide the keyword argument "url" to the handler, e.g.::
 
         application = web.Application([
             (r"/oldpath", web.RedirectHandler, {"url": "/newpath"}),
@@ -1349,7 +1353,7 @@ class StaticFileHandler(RequestHandler):
     """A simple handler that can serve static content from a directory.
 
     To map a path to this handler for a static data directory /var/www,
-    you would add a line to your application like:
+    you would add a line to your application like::
 
         application = web.Application([
             (r"/static/(.*)", web.StaticFileHandler, {"path": "/var/www"}),
@@ -1436,7 +1440,8 @@ class FallbackHandler(RequestHandler):
     The fallback is a callable object that accepts an HTTPRequest,
     such as an Application or tornado.wsgi.WSGIContainer.  This is most
     useful to use both tornado RequestHandlers and WSGI in the same server.
-    Typical usage:
+    Typical usage::
+
         wsgi_app = tornado.wsgi.WSGIContainer(
             django.core.handlers.wsgi.WSGIHandler())
         application = tornado.web.Application([
@@ -1580,6 +1585,7 @@ class UIModule(object):
         self.locale = handler.locale
 
     def render(self, *args, **kwargs):
+        """Overridden in subclasses to return this module's output."""
         raise NotImplementedError()
 
     def embedded_javascript(self):
@@ -1607,7 +1613,85 @@ class UIModule(object):
         return None
 
     def render_string(self, path, **kwargs):
+        """Renders a template and returns it as a string."""
         return self.handler.render_string(path, **kwargs)
+
+class _linkify(UIModule):
+    def render(self, text, **kwargs):
+        return escape.linkify(text, **kwargs)
+
+class _xsrf_form_html(UIModule):
+    def render(self):
+        return self.handler.xsrf_form_html()
+
+class TemplateModule(UIModule):
+    """UIModule that simply renders the given template.
+
+    {% module Template("foo.html") %} is similar to {% include "foo.html" %},
+    but the module version gets its own namespace (with kwargs passed to
+    Template()) instead of inheriting the outer template's namespace.
+
+    Templates rendered through this module also get access to UIModule's
+    automatic javascript/css features.  Simply call set_resources
+    inside the template and give it keyword arguments corresponding to
+    the methods on UIModule: {{ set_resources(js_files=static_url("my.js")) }}
+    Note that these resources are output once per template file, not once
+    per instantiation of the template, so they must not depend on 
+    any arguments to the template.
+    """
+    def __init__(self, handler):
+        super(TemplateModule, self).__init__(handler)
+        # keep resources in both a list and a dict to preserve order
+        self._resource_list = []
+        self._resource_dict = {}
+
+    def render(self, path, **kwargs):
+        def set_resources(**kwargs):
+            if path not in self._resource_dict:
+                self._resource_list.append(kwargs)
+                self._resource_dict[path] = kwargs
+            else:
+                if self._resource_dict[path] != kwargs:
+                    raise ValueError("set_resources called with different "
+                                     "resources for the same template")
+            return ""
+        return self.render_string(path, set_resources=set_resources,
+                                  **kwargs)
+
+    def _get_resources(self, key):
+        return (r[key] for r in self._resource_list if key in r)
+
+    def embedded_javascript(self):
+        return "\n".join(self._get_resources("embedded_javascript"))
+
+    def javascript_files(self):
+        result = []
+        for f in self._get_resources("javascript_files"):
+            if isinstance(f, (unicode, bytes_type)):
+                result.append(f)
+            else:
+                result.extend(f)
+        return result
+
+    def embedded_css(self):
+        return "\n".join(self._get_resources("embedded_css"))
+
+    def css_files(self):
+        result = []
+        for f in self._get_resources("css_files"):
+            if isinstance(f, (unicode, bytes_type)):
+                result.append(f)
+            else:
+                result.extend(f)
+        return result
+
+    def html_head(self):
+        return "".join(self._get_resources("html_head"))
+
+    def html_body(self):
+        return "".join(self._get_resources("html_body"))
+
+
 
 class URLSpec(object):
     """Specifies mappings between URLs and handlers."""
@@ -1615,12 +1699,16 @@ class URLSpec(object):
         """Creates a URLSpec.
 
         Parameters:
+
         pattern: Regular expression to be matched.  Any groups in the regex
             will be passed in to the handler's get/post/etc methods as
             arguments.
+
         handler_class: RequestHandler subclass to be invoked.
+
         kwargs (optional): A dictionary of additional arguments to be passed
             to the handler's constructor.
+
         name (optional): A name for this handler.  Used by
             Application.reverse_url.
         """
@@ -1670,16 +1758,6 @@ class URLSpec(object):
         return self._path % tuple([str(a) for a in args])
 
 url = URLSpec
-
-
-def _unicode(s):
-    if isinstance(s, bytes_type):
-        try:
-            return s.decode("utf-8")
-        except UnicodeDecodeError:
-            raise HTTPError(400, "Non-utf8 argument")
-    assert isinstance(s, unicode)
-    return s
 
 
 def _time_independent_equals(a, b):

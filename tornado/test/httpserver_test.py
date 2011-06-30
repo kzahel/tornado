@@ -2,17 +2,11 @@
 
 from tornado import httpclient, simple_httpclient
 from tornado.escape import json_decode, utf8, _unicode, recursive_unicode
-from tornado.iostream import IOStream
 from tornado.simple_httpclient import SimpleAsyncHTTPClient
 from tornado.testing import AsyncHTTPTestCase, LogTrapTestCase
 from tornado.util import b, bytes_type
 from tornado.web import Application, RequestHandler
-import logging
 import os
-import re
-import socket
-import unittest
-import urllib
 
 try:
     import ssl
@@ -116,7 +110,7 @@ class HTTPConnectionTest(AsyncHTTPTestCase, LogTrapTestCase):
         response = self.raw_fetch([
                 b("POST /multipart HTTP/1.0"),
                 b("Content-Type: multipart/form-data; boundary=1234567890"),
-                u"X-Header-encoding-test: \u00e9".encode("latin1"),
+                b("X-Header-encoding-test: \xe9"),
                 ],
                                   b("\r\n").join([
                     b("Content-Disposition: form-data; name=argument"),

@@ -3,7 +3,7 @@
 import tornado.escape
 import unittest
 
-from tornado.escape import utf8, xhtml_escape, xhtml_unescape, url_escape, url_unescape, to_unicode
+from tornado.escape import utf8, xhtml_escape, xhtml_unescape, url_escape, url_unescape, to_unicode, json_decode, json_encode
 from tornado.util import b
 
 linkify_tests = [
@@ -165,3 +165,25 @@ class EscapeTestCase(unittest.TestCase):
             # and unicode strings.
             self.assertEqual(url_unescape(to_unicode(escaped), encoding), unescaped)
             self.assertEqual(url_unescape(utf8(escaped), encoding), unescaped)
+
+    def test_escape_return_types(self):
+        # On python2 the escape methods should generally return the same
+        # type as their argument
+        self.assertEqual(type(xhtml_escape("foo")), str)
+        self.assertEqual(type(xhtml_escape(u"foo")), unicode)
+
+    def test_json_decode(self):
+        # json_decode accepts both bytes and unicode, but strings it returns
+        # are always unicode.
+        self.assertEqual(json_decode(b('"foo"')), u"foo")
+        self.assertEqual(json_decode(u'"foo"'), u"foo")
+
+        # Non-ascii bytes are interpreted as utf8
+        self.assertEqual(json_decode(utf8(u'"\u00e9"')), u"\u00e9")
+
+    def test_json_encode(self):
+        # json deals with strings, not bytes, but our encoding function should
+        # accept bytes as well as long as they are utf8.
+        self.assertEqual(json_decode(json_encode(u"\u00e9")), u"\u00e9")
+        self.assertEqual(json_decode(json_encode(utf8(u"\u00e9"))), u"\u00e9")
+        self.assertRaises(UnicodeDecodeError, json_encode, b("\xe9"))

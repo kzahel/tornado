@@ -14,7 +14,15 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""A non-blocking, single-threaded HTTP server."""
+"""A non-blocking, single-threaded HTTP server.
+
+Typical applications have little direct interaction with the `HTTPServer`
+class except to start a server at the beginning of the process
+(and even that is often done indirectly via `tornado.web.Application.listen`).
+
+This module also defines the `HTTPRequest` class which is exposed via
+`tornado.web.RequestHandler.request`.
+"""
 
 import errno
 import logging
@@ -64,14 +72,14 @@ def _cpu_count():
 
 
 class HTTPServer(object):
-    """A non-blocking, single-threaded HTTP server.
+    r"""A non-blocking, single-threaded HTTP server.
 
     A server is defined by a request callback that takes an HTTPRequest
     instance as an argument and writes a valid HTTP response with
     request.write(). request.finish() finishes the request (but does not
     necessarily close the connection in the case of HTTP/1.1 keep-alive
     requests). A simple example server that echoes back the URI you
-    requested:
+    requested::
 
         import httpserver
         import ioloop
@@ -105,7 +113,7 @@ class HTTPServer(object):
     HTTPServer can serve HTTPS (SSL) traffic with Python 2.6+ and OpenSSL.
     To make this server serve SSL traffic, send the ssl_options dictionary
     argument with the arguments required for the ssl.wrap_socket() method,
-    including "certfile" and "keyfile":
+    including "certfile" and "keyfile"::
 
        HTTPServer(applicaton, ssl_options={
            "certfile": os.path.join(data_dir, "mydomain.crt"),
@@ -114,7 +122,7 @@ class HTTPServer(object):
 
     By default, listen() runs in a single thread in a single process. You
     can utilize all available CPUs on this machine by calling bind() and
-    start() instead of listen():
+    start() instead of listen()::
 
         http_server = httpserver.HTTPServer(handle_request)
         http_server.bind(8888)
@@ -175,9 +183,15 @@ class HTTPServer(object):
         """
         if address == "":
             address = None
-        success = 0
+        flags = socket.AI_PASSIVE
+        if hasattr(socket, "AI_ADDRCONFIG"):
+            # AI_ADDRCONFIG ensures that we only try to bind on ipv6
+            # if the system is configured for it, but the flag doesn't
+            # exist on some platforms (specifically WinXP, although
+            # newer versions of windows have it)
+            flags |= socket.AI_ADDRCONFIG
         for res in socket.getaddrinfo(address, port, family, socket.SOCK_STREAM,
-                                      0, socket.AI_PASSIVE | socket.AI_ADDRCONFIG):
+                                      0, flags):
             af, socktype, proto, canonname, sockaddr = res
             sock = socket.socket(af, socktype, proto)
             flags = fcntl.fcntl(sock.fileno(), fcntl.F_GETFD)
@@ -199,7 +213,9 @@ class HTTPServer(object):
             sock.bind(sockaddr)
             sock.listen(128)
             self._sockets[sock.fileno()] = sock
-            success += 1
+            if self._started:
+                self.io_loop.add_handler(sock.fileno(), self._handle_events,
+                                         ioloop.IOLoop.READ)
 
     def start(self, num_processes=1):
         """Starts this server in the IOLoop.
@@ -258,6 +274,11 @@ class HTTPServer(object):
                                          ioloop.IOLoop.READ)
 
     def stop(self):
+        """Stops listening for new connections.
+
+        Requests currently in progress may still continue after the
+        server is stopped.
+        """
         for fd, sock in self._sockets.iteritems():
             self.io_loop.remove_handler(fd)
             sock.close()
@@ -294,7 +315,7 @@ class HTTPServer(object):
                     stream = iostream.IOStream(connection, io_loop=self.io_loop)
                 HTTPConnection(stream, address, self.request_callback,
                                self.no_keep_alive, self.xheaders)
-            except:
+            except Exception:
                 logging.error("Error in connection callback", exc_info=True)
 
 class _BadRequestException(Exception):
@@ -322,11 +343,13 @@ class HTTPConnection(object):
         self.stream.read_until(b("\r\n\r\n"), self._header_callback)
 
     def write(self, chunk):
+        """Writes a chunk of output to the stream."""
         assert self._request, "Request closed"
         if not self.stream.closed():
             self.stream.write(chunk, self._on_write_complete)
 
     def finish(self):
+        """Finishes the request."""
         assert self._request, "Request closed"
         self._request_finished = True
         if not self.stream.writing():
@@ -404,72 +427,85 @@ class HTTPConnection(object):
                 for field in fields:
                     k, sep, v = field.strip().partition("=")
                     if k == "boundary" and v:
-                        self._parse_mime_body(utf8(v), data)
+                        httputil.parse_multipart_form_data(
+                            utf8(v), data,
+                            self._request.arguments,
+                            self._request.files)
                         break
                 else:
                     logging.warning("Invalid multipart/form-data")
         self.request_callback(self._request)
 
-    def _parse_mime_body(self, boundary, data):
-        # The standard allows for the boundary to be quoted in the header,
-        # although it's rare (it happens at least for google app engine
-        # xmpp).  I think we're also supposed to handle backslash-escapes
-        # here but I'll save that until we see a client that uses them
-        # in the wild.
-        if boundary.startswith(b('"')) and boundary.endswith(b('"')):
-            boundary = boundary[1:-1]
-        if data.endswith(b("\r\n")):
-            footer_length = len(boundary) + 6
-        else:
-            footer_length = len(boundary) + 4
-        parts = data[:-footer_length].split(b("--") + boundary + b("\r\n"))
-        for part in parts:
-            if not part: continue
-            eoh = part.find(b("\r\n\r\n"))
-            if eoh == -1:
-                logging.warning("multipart/form-data missing headers")
-                continue
-            headers = httputil.HTTPHeaders.parse(part[:eoh].decode("utf-8"))
-            name_header = headers.get("Content-Disposition", "")
-            if not name_header.startswith("form-data;") or \
-               not part.endswith(b("\r\n")):
-                logging.warning("Invalid multipart/form-data")
-                continue
-            value = part[eoh + 4:-2]
-            name_values = {}
-            for name_part in name_header[10:].split(";"):
-                name, name_value = name_part.strip().split("=", 1)
-                name_values[name] = name_value.strip('"')
-            if not name_values.get("name"):
-                logging.warning("multipart/form-data value missing name")
-                continue
-            name = name_values["name"]
-            if name_values.get("filename"):
-                ctype = headers.get("Content-Type", "application/unknown")
-                self._request.files.setdefault(name, []).append(dict(
-                    filename=name_values["filename"], body=value,
-                    content_type=ctype))
-            else:
-                self._request.arguments.setdefault(name, []).append(value)
-
 
 class HTTPRequest(object):
     """A single HTTP request.
 
-    GET/POST arguments are available in the arguments property, which
-    maps arguments names to lists of values (to support multiple values
-    for individual names). Names and values are both unicode always.
+    .. attribute:: method
 
-    File uploads are available in the files property, which maps file
-    names to list of files. Each file is a dictionary of the form
-    {"filename":..., "content_type":..., "body":...}. The content_type
-    comes from the provided HTTP header and should not be trusted
-    outright given that it can be easily forged.
+       HTTP request method, e.g. "GET" or "POST"
 
-    An HTTP request is attached to a single HTTP connection, which can
-    be accessed through the "connection" attribute. Since connections
-    are typically kept open in HTTP/1.1, multiple requests can be handled
-    sequentially on a single connection.
+    .. attribute:: uri
+
+       The requested uri.
+
+    .. attribute:: path
+
+       The path portion of `uri`
+
+    .. attribute:: query
+
+       The query portion of `uri`
+
+    .. attribute:: version
+
+       HTTP version specified in request, e.g. "HTTP/1.1"
+
+    .. attribute:: headers
+
+       `HTTPHeader` dictionary-like object for request headers.  Acts like
+       a case-insensitive dictionary with additional methods for repeated
+       headers.
+
+    .. attribute:: body
+
+       Request body, if present.
+
+    .. attribute:: remote_ip
+
+       Client's IP address as a string.  If `HTTPServer.xheaders` is set,
+       will pass along the real IP address provided by a load balancer
+       in the ``X-Real-Ip`` header
+
+    .. attribute:: protocol
+
+       The protocol used, either "http" or "https".  If `HTTPServer.xheaders`
+       is seet, will pass along the protocol used by a load balancer if
+       reported via an ``X-Scheme`` header.
+
+    .. attribute:: host
+
+       The requested hostname, usually taken from the ``Host`` header.
+
+    .. attribute:: arguments
+
+       GET/POST arguments are available in the arguments property, which
+       maps arguments names to lists of values (to support multiple values
+       for individual names). Names and values are both unicode always.
+
+    .. attribute:: files
+
+       File uploads are available in the files property, which maps file
+       names to list of files. Each file is a dictionary of the form
+       {"filename":..., "content_type":..., "body":...}. The content_type
+       comes from the provided HTTP header and should not be trusted
+       outright given that it can be easily forged.
+
+    .. attribute:: connection
+
+       An HTTP request is attached to a single HTTP connection, which can
+       be accessed through the "connection" attribute. Since connections
+       are typically kept open in HTTP/1.1, multiple requests can be handled
+       sequentially on a single connection.
     """
     def __init__(self, method, uri, version="HTTP/1.0", headers=None,
                  body=None, remote_ip=None, protocol=None, host=None,
@@ -541,7 +577,8 @@ class HTTPRequest(object):
         """Returns the client's SSL certificate, if any.
 
         To use client certificates, the HTTPServer must have been constructed
-        with cert_reqs set in ssl_options, e.g.:
+        with cert_reqs set in ssl_options, e.g.::
+
             server = HTTPServer(app,
                 ssl_options=dict(
                     certfile="foo.crt",

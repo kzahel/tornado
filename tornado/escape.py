@@ -14,7 +14,11 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Escaping/unescaping methods for HTML, JSON, URLs, and others."""
+"""Escaping/unescaping methods for HTML, JSON, URLs, and others.
+
+Also includes a few other miscellaneous string manipulation functions that
+have crept in over time.
+"""
 
 import htmlentitydefs
 import re
@@ -24,7 +28,7 @@ import urllib
 
 # Python3 compatibility:  On python2.5, introduce the bytes alias from 2.6
 try: bytes
-except: bytes = str
+except Exception: bytes = str
 
 try:
     from urlparse import parse_qs  # Python 2.6+
@@ -38,7 +42,7 @@ try:
     assert hasattr(json, "loads") and hasattr(json, "dumps")
     _json_decode = json.loads
     _json_encode = json.dumps
-except:
+except Exception:
     try:
         import simplejson
         _json_decode = lambda s: simplejson.loads(_unicode(s))
@@ -59,7 +63,7 @@ except:
 
 def xhtml_escape(value):
     """Escapes a string so it is valid within XML or XHTML."""
-    return xml.sax.saxutils.escape(native_str(value), {'"': "&quot;"})
+    return xml.sax.saxutils.escape(to_basestring(value), {'"': "&quot;"})
 
 
 def xhtml_unescape(value):
@@ -75,12 +79,12 @@ def json_encode(value):
     # the javscript.  Some json libraries do this escaping by default,
     # although python's standard library does not, so we do it here.
     # http://stackoverflow.com/questions/1580647/json-why-are-forward-slashes-escaped
-    return _json_encode(value).replace("</", "<\\/")
+    return _json_encode(recursive_unicode(value)).replace("</", "<\\/")
 
 
 def json_decode(value):
     """Returns Python objects for the given JSON string."""
-    return _json_decode(native_str(value))
+    return _json_decode(to_basestring(value))
 
 
 def squeeze(value):
@@ -122,7 +126,7 @@ else:
         if encoding is None:
             return urllib.parse.unquote_to_bytes(value)
         else:
-            return urllib.unquote_plus(native_str(value), encoding=encoding)
+            return urllib.unquote_plus(to_basestring(value), encoding=encoding)
 
     def parse_qs_bytes(qs, keep_blank_values=False, strict_parsing=False):
         """Parses a query string like urlparse.parse_qs, but returns the
@@ -178,6 +182,20 @@ if str is unicode:
 else:
     native_str = utf8
 
+_BASESTRING_TYPES = (basestring, type(None))
+def to_basestring(value):
+    """Converts a string argument to a subclass of basestring.
+
+    In python2, byte and unicode strings are mostly interchangeable,
+    so functions that deal with a user-supplied argument in combination
+    with ascii string constants can use either and should return the type
+    the user supplied.  In python3, the two types are not interchangeable,
+    so this method is needed to convert byte strings to unicode.
+    """
+    if isinstance(value, _BASESTRING_TYPES):
+        return value
+    assert isinstance(value, bytes)
+    return value.decode("utf-8")
 
 def recursive_unicode(obj):
     """Walks a simple data structure, converting byte strings to unicode.
@@ -207,15 +225,19 @@ def linkify(text, shorten=False, extra_params="",
             require_protocol=False, permitted_protocols=["http", "https"]):
     """Converts plain text into HTML with links.
 
-    For example: linkify("Hello http://tornadoweb.org!") would return
-    Hello <a href="http://tornadoweb.org">http://tornadoweb.org</a>!
+    For example: ``linkify("Hello http://tornadoweb.org!")`` would return
+    ``Hello <a href="http://tornadoweb.org">http://tornadoweb.org</a>!``
 
     Parameters:
+
     shorten: Long urls will be shortened for display.
+
     extra_params: Extra text to include in the link tag,
         e.g. linkify(text, extra_params='rel="nofollow" class="external"')
+
     require_protocol: Only linkify urls which include a protocol. If this is
         False, urls such as www.facebook.com will also be linkified.
+
     permitted_protocols: List (or set) of protocols which should be linkified,
         e.g. linkify(text, permitted_protocols=["http", "ftp", "mailto"]).
         It is very unsafe to include protocols such as "javascript".

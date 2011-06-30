@@ -1,27 +1,26 @@
+"""Server-side implementation of the WebSocket protocol.
+
+`WebSockets <http://dev.w3.org/html5/websockets/>`_ allow for bidirectional
+communication between the browser and server.
+
+.. warning::
+
+   The WebSocket protocol is still in development.  This module currently
+   implements the "draft76" version of the protocol, which is supported
+   only by Chrome and Safari.  See this `browser compatibility table 
+   <http://en.wikipedia.org/wiki/WebSockets#Browser_support>`_ on Wikipedia.
+"""
 # Author: Jacob Kristhammar, 2010
-#
-# Updated version of websocket.py[1] that implements latest[2] stable version
-# of the websocket protocol.
-#
-# NB. It's no longer possible to manually select which callback that should
-#     be invoked upon message reception. Instead you must override the
-#     on_message(message) method to handle incoming messsages.
-#     This also means that you don't have to explicitly invoke
-#     receive_message, in fact you shouldn't.
-#
-# [1] http://github.com/facebook/tornado/blob/
-#     2c89b89536bbfa081745336bb5ab5465c448cb8a/tornado/websocket.py
-# [2] http://tools.ietf.org/html/draft-hixie-thewebsocketprotocol-76
 
 import functools
 import hashlib
 import logging
-import re
 import struct
 import time
 import tornado.escape
 import tornado.web
 
+from tornado.util import bytes_type, b
 
 class WebSocketHandler(tornado.web.RequestHandler):
     """Subclass this class to create a basic WebSocket handler.
@@ -34,7 +33,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
     http://tools.ietf.org/html/draft-hixie-thewebsocketprotocol-76.
 
     Here is an example Web Socket handler that echos back all received messages
-    back to the client:
+    back to the client::
 
       class EchoWebSocket(websocket.WebSocketHandler):
           def open(self):
@@ -54,7 +53,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
     implement open() method rather than get() or post().
 
     If you map the handler above to "/websocket" in your application, you can
-    invoke it in JavaScript with:
+    invoke it in JavaScript with::
 
       var ws = new WebSocket("ws://localhost:8888/websocket");
       ws.onopen = function() {
@@ -111,7 +110,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
         self._write_response(challenge_response)
 
     def _write_response(self, challenge):
-        self.stream.write("%s" % challenge)
+        self.stream.write(challenge)
         self.async_callback(self.open)(*self.open_args, **self.open_kwargs)
         self._receive_message()
 
@@ -121,8 +120,8 @@ class WebSocketHandler(tornado.web.RequestHandler):
             message = tornado.escape.json_encode(message)
         if isinstance(message, unicode):
             message = message.encode("utf-8")
-        assert isinstance(message, str)
-        self.stream.write("\x00" + message + "\xff")
+        assert isinstance(message, bytes_type)
+        self.stream.write(b("\x00") + message + b("\xff"))
 
     def open(self, *args, **kwargs):
         """Invoked when a new WebSocket is opened."""
@@ -164,7 +163,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
         def wrapper(*args, **kwargs):
             try:
                 return callback(*args, **kwargs)
-            except Exception, e:
+            except Exception:
                 logging.error("Uncaught exception in %s",
                               self.request.path, exc_info=True)
                 self._abort()
@@ -181,7 +180,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
     def _on_frame_type(self, byte):
         frame_type = ord(byte)
         if frame_type == 0x00:
-            self.stream.read_until("\xff", self._on_end_delimiter)
+            self.stream.read_until(b("\xff"), self._on_end_delimiter)
         elif frame_type == 0xff:
             self.stream.read_bytes(1, self._on_length_indicator)
         else:
@@ -262,7 +261,7 @@ class WebSocketRequest(object):
         number = int(''.join(c for c in key if c.isdigit()))
         spaces = len([c for c in key if c.isspace()])
         try:
-            key_number = number / spaces
+            key_number = number // spaces
         except (ValueError, ZeroDivisionError):
             raise ValueError
         return struct.pack(">I", key_number)

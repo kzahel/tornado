@@ -16,7 +16,7 @@
 
 """A command line parsing module that lets modules define their own options.
 
-Each module defines its own options, e.g.,
+Each module defines its own options, e.g.::
 
     from tornado.options import define, options
 
@@ -31,14 +31,14 @@ Each module defines its own options, e.g.,
 The main() method of your application does not need to be aware of all of
 the options used throughout your program; they are all automatically loaded
 when the modules are loaded. Your main() method can parse the command line
-or parse a config file with:
+or parse a config file with::
 
     import tornado.options
     tornado.options.parse_config_file("/etc/server.conf")
     tornado.options.parse_command_line()
 
 Command line formats are what you would expect ("--myoption=myvalue").
-Config files are just Python files. Global names become options, e.g.,
+Config files are just Python files. Global names become options, e.g.::
 
     myoption = "myvalue"
     myotheroption = "myothervalue"
@@ -60,7 +60,7 @@ from tornado.escape import _unicode
 # For pretty log messages, if available
 try:
     import curses
-except:
+except ImportError:
     curses = None
 
 
@@ -77,7 +77,7 @@ def define(name, default=None, type=None, help=None, metavar=None,
     turns into range(x, y) - very useful for long integer ranges.
 
     help and metavar are used to construct the automatically generated
-    command line help string. The help message is formatted like:
+    command line help string. The help message is formatted like::
 
        --name=METAVAR      help string
 
@@ -295,7 +295,7 @@ class _Option(object):
                 sum += datetime.timedelta(**{units: num})
                 start = m.end()
             return sum
-        except:
+        except Exception:
             raise
 
     def _parse_bool(self, value):
@@ -306,11 +306,15 @@ class _Option(object):
 
 
 class Error(Exception):
+    """Exception raised by errors in the options module."""
     pass
 
 
 def enable_pretty_logging():
-    """Turns on formatted logging output as configured."""
+    """Turns on formatted logging output as configured.
+    
+    This is called automatically by `parse_command_line`.
+    """
     root_logger = logging.getLogger()
     if options.log_file_prefix:
         channel = logging.handlers.RotatingFileHandler(
@@ -329,7 +333,7 @@ def enable_pretty_logging():
                 curses.setupterm()
                 if curses.tigetnum("colors") > 0:
                     color = True
-            except:
+            except Exception:
                 pass
         channel = logging.StreamHandler()
         channel.setFormatter(_LogFormatter(color=color))

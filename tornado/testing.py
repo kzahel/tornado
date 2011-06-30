@@ -2,11 +2,14 @@
 """Support classes for automated testing.
 
 This module contains three parts:
-* AsyncTestCase/AsyncHTTPTestCase:  Subclasses of unittest.TestCase
+
+* `AsyncTestCase`/`AsyncHTTPTestCase`:  Subclasses of unittest.TestCase
   with additional support for testing asynchronous (IOLoop-based) code.
-* LogTrapTestCase:  Subclass of unittest.TestCase that discards log output
+
+* `LogTrapTestCase`:  Subclass of unittest.TestCase that discards log output
   from tests that pass and only produces output for failing tests.
-* main(): A simple test runner (wrapper around unittest.main()) with support
+
+* `main()`: A simple test runner (wrapper around unittest.main()) with support
   for the tornado.autoreload module to rerun the tests when code changes.
 
 These components may be used together or independently.  In particular,
@@ -22,13 +25,11 @@ from tornado.httpclient import AsyncHTTPClient
 from tornado.httpserver import HTTPServer
 from tornado.stack_context import StackContext, NullContext
 import contextlib
-import functools
 import logging
 import os
 import sys
 import time
 import tornado.ioloop
-import traceback
 import unittest
 
 _next_port = 10000
@@ -58,7 +59,8 @@ class AsyncTestCase(unittest.TestCase):
     returned from self.wait.  It is possible to have multiple
     wait/stop cycles in the same test.
 
-    Example:
+    Example::
+
         # This test uses an asynchronous style similar to most async
         # application code.
         class MyTestCase(AsyncTestCase):
@@ -99,19 +101,7 @@ class AsyncTestCase(unittest.TestCase):
             # This avoids leaks, especially when tests are run repeatedly
             # in the same process with autoreload (because curl does not
             # set FD_CLOEXEC on its file descriptors)
-            for fd in self.io_loop._handlers.keys()[:]:
-                if (fd == self.io_loop._waker_reader.fileno() or
-                    fd == self.io_loop._waker_writer.fileno()):
-                    # Close these through the file objects that wrap
-                    # them, or else the destructor will try to close
-                    # them later and log a warning
-                    continue
-                try:
-                    os.close(fd)
-                except:
-                    logging.debug("error closing fd %d", fd, exc_info=True)
-            self.io_loop._waker_reader.close()
-            self.io_loop._waker_writer.close()
+            self.io_loop.close(all_fds=True)
         super(AsyncTestCase, self).tearDown()
 
     def get_new_ioloop(self):
@@ -125,7 +115,7 @@ class AsyncTestCase(unittest.TestCase):
     def _stack_context(self):
         try:
             yield
-        except:
+        except Exception:
             self.__failure = sys.exc_info()
             self.stop()
 
@@ -162,7 +152,7 @@ class AsyncTestCase(unittest.TestCase):
                         raise self.failureException(
                           'Async operation timed out after %d seconds' %
                           timeout)
-                    except:
+                    except Exception:
                         self.__failure = sys.exc_info()
                     self.stop()
                 self.io_loop.add_timeout(time.time() + timeout, timeout_func)
@@ -198,7 +188,8 @@ class AsyncHTTPTestCase(AsyncTestCase):
     Tests will typically use the provided self.http_client to fetch
     URLs from this server.
 
-    Example:
+    Example::
+
         class MyHTTPTest(AsyncHTTPTestCase):
             def get_app(self):
                 return Application([('/', MyHandler)...])
@@ -220,7 +211,7 @@ class AsyncHTTPTestCase(AsyncTestCase):
         self._app = self.get_app()
         self.http_server = HTTPServer(self._app, io_loop=self.io_loop,
                                       **self.get_httpserver_options())
-        self.http_server.listen(self.get_http_port())
+        self.http_server.listen(self.get_http_port(), address="127.0.0.1")
 
     def get_app(self):
         """Should be overridden by subclasses to return a
@@ -303,10 +294,16 @@ class LogTrapTestCase(unittest.TestCase):
             handler.stream = old_stream
 
 def main():
-    """A simple test runner with autoreload support.
+    """A simple test runner.
 
-    The easiest way to run a test is via the command line:
-        python -m tornado.testing --autoreload tornado.test.stack_context_test
+    This test runner is essentially equivalent to `unittest.main` from
+    the standard library, but adds support for tornado-style option
+    parsing and log formatting.
+
+    The easiest way to run a test is via the command line::
+
+        python -m tornado.testing tornado.test.stack_context_test
+
     See the standard library unittest module for ways in which tests can
     be specified.
 
@@ -314,21 +311,18 @@ def main():
     tornado/test/runtests.py.  This script should define a method all()
     which returns a test suite and then call tornado.testing.main().
     Note that even when a test script is used, the all() test suite may
-    be overridden by naming a single test on the command line.
-        # Runs all tests
-        tornado/test/runtests.py --autoreload
-        # Runs one test
-        tornado/test/runtests.py --autoreload tornado.test.stack_context_test
+    be overridden by naming a single test on the command line::
 
-    If --autoreload is specified, the process will continue running
-    after the tests finish, and when any source file changes the tests
-    will be rerun.  Without --autoreload, the process will exit
-    once the tests finish (with an exit status of 0 for success and
-    non-zero for failures).
+        # Runs all tests
+        tornado/test/runtests.py
+        # Runs one test
+        tornado/test/runtests.py tornado.test.stack_context_test
+
     """
     from tornado.options import define, options, parse_command_line
 
-    define('autoreload', type=bool, default=False)
+    define('autoreload', type=bool, default=False,
+           help="DEPRECATED: use tornado.autoreload.main instead")
     define('httpclient', type=str, default=None)
     argv = [sys.argv[0]] + parse_command_line(sys.argv)
 
@@ -359,10 +353,7 @@ def main():
             raise
     if options.autoreload:
         import tornado.autoreload
-        import tornado.ioloop
-        ioloop = tornado.ioloop.IOLoop()
-        tornado.autoreload.start(ioloop)
-        ioloop.start()
+        tornado.autoreload.wait()
 
 if __name__ == '__main__':
     main()

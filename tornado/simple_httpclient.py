@@ -2,7 +2,7 @@
 from __future__ import with_statement
 
 from tornado.escape import utf8, _unicode, native_str
-from tornado.httpclient import HTTPRequest, HTTPResponse, HTTPError, AsyncHTTPClient
+from tornado.httpclient import HTTPRequest, HTTPResponse, HTTPError, AsyncHTTPClient, main
 from tornado.httputil import HTTPHeaders
 from tornado.ioloop import IOLoop
 from tornado.iostream import IOStream, SSLIOStream
@@ -13,7 +13,6 @@ import base64
 import collections
 import contextlib
 import copy
-import errno
 import functools
 import logging
 import os.path
@@ -134,6 +133,12 @@ class _HTTPConnection(object):
         self._timeout = None
         with stack_context.StackContext(self.cleanup):
             parsed = urlparse.urlsplit(_unicode(self.request.url))
+            if ssl is None and parsed.scheme == "https":
+                raise ValueError("HTTPS requires either python2.6+ or "
+                                 "curl_httpclient")
+            if parsed.scheme not in ("http", "https"):
+                raise ValueError("Unsupported url scheme: %s" %
+                                 self.request.url)
             # urlsplit results have hostname and port results, but they
             # didn't support ipv6 literals until python 2.7.
             netloc = parsed.netloc
@@ -294,8 +299,7 @@ class _HTTPConnection(object):
             self.stream.read_bytes(int(self.headers["Content-Length"]),
                                    self._on_body)
         else:
-            raise Exception("No Content-length or chunked encoding, "
-                            "don't know how to read %s", self.request.url)
+            self.stream.read_until_close(self._on_body)
 
     def _on_body(self, data):
         if self._timeout is not None:
@@ -414,24 +418,6 @@ def match_hostname(cert, hostname):
         raise CertificateError("no appropriate commonName or "
             "subjectAltName fields were found")
 
-def main():
-    from tornado.options import define, options, parse_command_line
-    define("print_headers", type=bool, default=False)
-    define("print_body", type=bool, default=True)
-    define("follow_redirects", type=bool, default=True)
-    args = parse_command_line()
-    client = SimpleAsyncHTTPClient()
-    io_loop = IOLoop.instance()
-    for arg in args:
-        def callback(response):
-            io_loop.stop()
-            response.rethrow()
-            if options.print_headers:
-                print response.headers
-            if options.print_body:
-                print response.body
-        client.fetch(arg, callback, follow_redirects=options.follow_redirects)
-        io_loop.start()
-
 if __name__ == "__main__":
+    AsyncHTTPClient.configure(SimpleAsyncHTTPClient)
     main()

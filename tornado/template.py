@@ -16,19 +16,19 @@
 
 """A simple template system that compiles templates to Python code.
 
-Basic usage looks like:
+Basic usage looks like::
 
     t = template.Template("<html>{{ myvalue }}</html>")
     print t.generate(myvalue="XXX")
 
 Loader is a class that loads templates from a root directory and caches
-the compiled templates:
+the compiled templates::
 
     loader = template.Loader("/home/btaylor")
     print loader.load("test.html").generate(myvalue="XXX")
 
 We compile all templates to raw Python. Error-reporting is currently... uh,
-interesting. Syntax for the templates
+interesting. Syntax for the templates::
 
     ### base.html
     <html>
@@ -57,7 +57,7 @@ interesting. Syntax for the templates
 
 Unlike most other template systems, we do not put any restrictions on the
 expressions you can include in your statements. if and for blocks get
-translated exactly into Python, do you can do complex expressions like:
+translated exactly into Python, do you can do complex expressions like::
 
    {% for student in [p for p in people if p.student and p.age > 23] %}
      <li>{{ escape(student.name) }}</li>
@@ -65,7 +65,7 @@ translated exactly into Python, do you can do complex expressions like:
 
 Translating directly to Python means you can apply functions to expressions
 easily, like the escape() function in the examples above. You can pass
-functions in to your template just like any other variable:
+functions in to your template just like any other variable::
 
    ### Python code
    def add(x, y):
@@ -77,6 +77,11 @@ functions in to your template just like any other variable:
 
 We provide the functions escape(), url_escape(), json_encode(), and squeeze()
 to all templates by default.
+
+Typical applications do not create `Template` or `Loader` instances by
+hand, but instead use the `render` and `render_string` methods of
+`tornado.web.RequestHandler`, which load templates automatically based
+on the ``template_path`` `Application` setting.
 """
 
 from __future__ import with_statement
@@ -90,7 +95,7 @@ import re
 from tornado import escape
 from tornado.util import bytes_type
 
-_DEFAULT_AUTOESCAPE = None
+_DEFAULT_AUTOESCAPE = "xhtml_escape"
 _UNSET = object()
 
 class Template(object):
@@ -115,8 +120,9 @@ class Template(object):
         self.file = _File(_parse(reader, self))
         self.code = self._generate_python(loader, compress_whitespace)
         try:
-            self.compiled = compile(self.code, self.name, "exec")
-        except:
+            self.compiled = compile(self.code, "<template %s>" % self.name,
+                                    "exec")
+        except Exception:
             formatted_code = _format_code(self.code).rstrip()
             logging.error("%s code:\n%s", self.name, formatted_code)
             raise
@@ -139,7 +145,7 @@ class Template(object):
         execute = namespace["_execute"]
         try:
             return execute()
-        except:
+        except Exception:
             formatted_code = _format_code(self.code).rstrip()
             logging.error("%s code:\n%s", self.name, formatted_code)
             raise
@@ -174,6 +180,7 @@ class Template(object):
 
 
 class BaseLoader(object):
+    """Base class for template loaders."""
     def __init__(self, root_directory, autoescape=_DEFAULT_AUTOESCAPE):
         """Creates a template loader.
 
@@ -188,9 +195,11 @@ class BaseLoader(object):
         self.templates = {}
 
     def reset(self):
+        """Resets the cache of compiled templates."""
         self.templates = {}
 
     def resolve_path(self, name, parent_path=None):
+        """Converts a possibly-relative path to absolute (used internally)."""
         if parent_path and not parent_path.startswith("<") and \
            not parent_path.startswith("/") and \
            not name.startswith("/"):
@@ -202,6 +211,7 @@ class BaseLoader(object):
         return name
 
     def load(self, name, parent_path=None):
+        """Loads a template."""
         name = self.resolve_path(name, parent_path=parent_path)
         if name not in self.templates:
             self.templates[name] = self._create_template(name)
@@ -388,6 +398,10 @@ class _Expression(_Node):
                               writer.current_template.autoescape)
         writer.write_line("_buffer.append(_tmp)")
 
+class _Module(_Expression):
+    def __init__(self, expression):
+        super(_Module, self).__init__("modules." + expression,
+                                      raw=True)
 
 class _Text(_Node):
     def __init__(self, value):
@@ -539,6 +553,15 @@ def _parse(reader, template, in_block=None):
         start_brace = reader.consume(2)
         line = reader.line
 
+        # Template directives may be escaped as "{{!" or "{%!".
+        # In this case output the braces and consume the "!".
+        # This is especially useful in conjunction with jquery templates,
+        # which also use double braces.
+        if reader.remaining() and reader[0] == "!":
+            reader.consume(1)
+            body.chunks.append(_Text(start_brace))
+            continue
+
         # Expression
         if start_brace == "{{":
             end = reader.find("}}")
@@ -588,7 +611,7 @@ def _parse(reader, template, in_block=None):
             return body
 
         elif operator in ("extends", "include", "set", "import", "from",
-                          "comment", "autoescape", "raw"):
+                          "comment", "autoescape", "raw", "module"):
             if operator == "comment":
                 continue
             if operator == "extends":
@@ -616,6 +639,8 @@ def _parse(reader, template, in_block=None):
                 continue
             elif operator == "raw":
                 block = _Expression(suffix, raw=True)
+            elif operator == "module":
+                block = _Module(suffix)
             body.chunks.append(block)
             continue
 

@@ -29,12 +29,13 @@ wrapping each AsyncHTTPClient callback in async_callback) to the mechanisms
 that transfer control from one context to another (e.g. AsyncHTTPClient
 itself, IOLoop, thread pools, etc).
 
-Example usage:
+Example usage::
+
     @contextlib.contextmanager
     def die_on_error():
         try:
             yield
-        except:
+        except Exception:
             logging.error("exception in asynchronous operation",exc_info=True)
             sys.exit(1)
 
@@ -51,7 +52,6 @@ from __future__ import with_statement
 import contextlib
 import functools
 import itertools
-import logging
 import sys
 import threading
 
@@ -61,16 +61,19 @@ class _State(threading.local):
 _state = _State()
 
 class StackContext(object):
-    def __init__(self, context_factory):
-        '''Establishes the given context as a StackContext that will be transferred.
+    '''Establishes the given context as a StackContext that will be transferred.
 
-        Note that the parameter is a callable that returns a context
-        manager, not the context itself.  That is, where for a
-        non-transferable context manager you would say
-          with my_context():
-        StackContext takes the function itself rather than its result:
-          with StackContext(my_context):
-        '''
+    Note that the parameter is a callable that returns a context
+    manager, not the context itself.  That is, where for a
+    non-transferable context manager you would say::
+
+      with my_context():
+
+    StackContext takes the function itself rather than its result::
+
+      with StackContext(my_context):
+    '''
+    def __init__(self, context_factory):
         self.context_factory = context_factory
 
     # Note that some of this code is duplicated in ExceptionStackContext
@@ -95,19 +98,19 @@ class StackContext(object):
             _state.contexts = self.old_contexts
 
 class ExceptionStackContext(object):
+    '''Specialization of StackContext for exception handling.
+
+    The supplied exception_handler function will be called in the
+    event of an uncaught exception in this context.  The semantics are
+    similar to a try/finally clause, and intended use cases are to log
+    an error, close a socket, or similar cleanup actions.  The
+    exc_info triple (type, value, traceback) will be passed to the
+    exception_handler function.
+
+    If the exception handler returns true, the exception will be
+    consumed and will not be propagated to other exception handlers.
+    '''
     def __init__(self, exception_handler):
-        '''Specialization of StackContext for exception handling.
-
-        The supplied exception_handler function will be called in the
-        event of an uncaught exception in this context.  The semantics are
-        similar to a try/finally clause, and intended use cases are to log
-        an error, close a socket, or similar cleanup actions.  The
-        exc_info triple (type, value, traceback) will be passed to the
-        exception_handler function.
-
-        If the exception handler returns true, the exception will be
-        consumed and will not be propagated to other exception handlers.
-        '''
         self.exception_handler = exception_handler
 
     def __enter__(self):

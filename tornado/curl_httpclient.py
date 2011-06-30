@@ -19,15 +19,9 @@
 from __future__ import with_statement
 
 import cStringIO
-import calendar
 import collections
-import email.utils
-import errno
-import httplib
 import logging
-import os
 import pycurl
-import sys
 import threading
 import time
 
@@ -253,9 +247,7 @@ class CurlAsyncHTTPClient(AsyncHTTPClient):
                 buffer=buffer, effective_url=effective_url, error=error,
                 request_time=time.time() - info["curl_start_time"],
                 time_info=time_info))
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except:
+        except Exception:
             self.handle_callback_exception(info["callback"])
 
 
@@ -395,11 +387,11 @@ def _curl_setup_request(curl, request, buffer, headers):
         userpwd = "%s:%s" % (request.auth_username, request.auth_password)
         curl.setopt(pycurl.HTTPAUTH, pycurl.HTTPAUTH_BASIC)
         curl.setopt(pycurl.USERPWD, userpwd)
-        logging.info("%s %s (username: %r)", request.method, request.url,
-                     request.auth_username)
+        logging.debug("%s %s (username: %r)", request.method, request.url,
+                      request.auth_username)
     else:
         curl.unsetopt(pycurl.USERPWD)
-        logging.info("%s %s", request.method, request.url)
+        logging.debug("%s %s", request.method, request.url)
     if threading.activeCount() > 1:
         # libcurl/pycurl is not thread-safe by default.  When multiple threads
         # are used, signals should be disabled.  This has the side effect
@@ -435,4 +427,5 @@ def _curl_debug(debug_type, debug_msg):
         logging.debug('%s %r', debug_types[debug_type], debug_msg)
 
 if __name__ == "__main__":
+    AsyncHTTPClient.configure(CurlAsyncHTTPClient)
     main()

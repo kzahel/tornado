@@ -5,7 +5,6 @@ from __future__ import with_statement
 import base64
 import binascii
 import gzip
-import logging
 import socket
 
 from contextlib import closing
@@ -138,7 +137,7 @@ class HTTPClientCommonTestCase(AsyncHTTPTestCase, LogTrapTestCase):
 
         with closing(socket.socket()) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(('', port))
+            sock.bind(('127.0.0.1', port))
             sock.listen(1)
             self.http_client.fetch("http://localhost:%d/" % port,
                                    self.stop,
@@ -204,6 +203,7 @@ class HTTPClientCommonTestCase(AsyncHTTPTestCase, LogTrapTestCase):
         self.assertEqual(response.body, byte_body)
 
     def test_ipv6(self):
+        self.http_server.bind(self.get_http_port(), address='::1')
         url = self.get_url("/hello").replace("localhost", "[::1]")
 
         # ipv6 is currently disabled by default and must be explicitly requested
