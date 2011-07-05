@@ -167,7 +167,7 @@ class IOStream(object):
         self._read_callback = stack_context.wrap(callback)
         self._add_io_state(self.io_loop.READ)
 
-    def write(self, data, callback=None):
+    def write(self, data, callback=None, failure_callback=None):
         """Write the given data to this stream.
 
         If callback is given, we call it when all of the buffered write
@@ -180,6 +180,7 @@ class IOStream(object):
         self._write_buffer.append(data)
         self._add_io_state(self.io_loop.WRITE)
         self._write_callback = stack_context.wrap(callback)
+        self._write_failure_callback = stack_context.wrap(failure_callback)
 
     def set_close_callback(self, callback):
         """Call the given callback when the stream is closed."""
@@ -197,6 +198,10 @@ class IOStream(object):
             self.io_loop.remove_handler(self.socket.fileno())
             self.socket.close()
             self.socket = None
+            if self._write_failure_callback:
+                # check if there's a write buffer and if stuff in it then run the write failure callback
+                if sum( map(len, self._write_buffer) ) > 0:
+                    self._run_callback(self._write_failure_callback)
             if self._close_callback:
                 self._run_callback(self._close_callback)
 
@@ -405,6 +410,7 @@ class IOStream(object):
                 else:
                     logging.warning("Write error on %d: %s",
                                     self.socket.fileno(), e)
+                    # do I need to run write failure callback here?
                     self.close()
                     return
         if not self._write_buffer and self._write_callback:

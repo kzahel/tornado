@@ -199,7 +199,7 @@ class HTTPRequest(object):
                  header_callback=None, prepare_curl_callback=None,
                  proxy_host=None, proxy_port=None, proxy_username=None,
                  proxy_password='', allow_nonstandard_methods=False,
-                 validate_cert=True, ca_certs=None,
+                 validate_cert=True, ca_certs=None, log_request=True,
                  allow_ipv6=None):
         """Creates an `HTTPRequest`.
 
@@ -278,6 +278,7 @@ class HTTPRequest(object):
         self.prepare_curl_callback = prepare_curl_callback
         self.allow_nonstandard_methods = allow_nonstandard_methods
         self.validate_cert = validate_cert
+        self.log_request = log_request
         self.ca_certs = ca_certs
         self.allow_ipv6 = allow_ipv6
         self.start_time = time.time()

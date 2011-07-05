@@ -334,6 +334,7 @@ class HTTPConnection(object):
         self.address = address
         self.request_callback = request_callback
         self.no_keep_alive = no_keep_alive
+        self.force_keep_alive = None
         self.xheaders = xheaders
         self._request = None
         self._request_finished = False
@@ -360,7 +361,9 @@ class HTTPConnection(object):
             self._finish_request()
 
     def _finish_request(self):
-        if self.no_keep_alive:
+        if self.force_keep_alive:
+            disconnect = False
+        elif self.no_keep_alive:
             disconnect = True
         else:
             connection_header = self._request.headers.get("Connection")
