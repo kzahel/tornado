@@ -35,40 +35,15 @@ from tornado.escape import utf8, native_str, parse_qs_bytes
 from tornado import httputil
 from tornado import ioloop
 from tornado import iostream
+from tornado import netutil
+from tornado import process
 from tornado import stack_context
 from tornado.util import b, bytes_type
-
-try:
-    import fcntl
-except ImportError:
-    if os.name == 'nt':
-        from tornado import win32_support as fcntl
-    else:
-        raise
 
 try:
     import ssl # Python 2.6+
 except ImportError:
     ssl = None
-
-try:
-    import multiprocessing # Python 2.6+
-except ImportError:
-    multiprocessing = None
-
-def _cpu_count():
-    if multiprocessing is not None:
-        try:
-            return multiprocessing.cpu_count()
-        except NotImplementedError:
-            pass
-    try:
-        return os.sysconf("SC_NPROCESSORS_CONF")
-    except ValueError:
-        pass
-    logging.error("Could not detect number of processors; "
-                  "running with one process")
-    return 1
 
 
 class HTTPServer(object):
@@ -120,51 +95,82 @@ class HTTPServer(object):
            "keyfile": os.path.join(data_dir, "mydomain.key"),
        })
 
-    By default, listen() runs in a single thread in a single process. You
-    can utilize all available CPUs on this machine by calling bind() and
-    start() instead of listen()::
+    HTTPServer initialization follows one of three patterns:
 
-        http_server = httpserver.HTTPServer(handle_request)
-        http_server.bind(8888)
-        http_server.start(0) # Forks multiple sub-processes
-        ioloop.IOLoop.instance().start()
+    1. `listen`: simple single-process::
 
-    start(0) detects the number of CPUs on this machine and "pre-forks" that
-    number of child processes so that we have one Tornado process per CPU,
-    all with their own IOLoop. You can also pass in the specific number of
-    child processes you want to run with if you want to override this
-    auto-detection.
+            server = HTTPServer(app)
+            server.listen(8888)
+            IOLoop.instance().start()
+
+       In many cases, `tornado.web.Application.listen` can be used to avoid
+       the need to explicitly create the ``HTTPServer``.
+
+    2. `bind`/`start`: simple multi-process::
+   
+            server = HTTPServer(app)
+            server.bind(8888)
+            server.start(0)  # Forks multiple sub-processes
+            IOLoop.instance().start()
+
+       When using this interface, an ``IOLoop`` must *not* be passed
+       to the ``HTTPServer`` constructor.  `start` will always start
+       the server on the default singleton ``IOLoop``.
+
+    3. `add_sockets`: advanced multi-process::
+
+            sockets = tornado.netutil.bind_sockets(8888)
+            tornado.process.fork_processes(0)
+            server = HTTPServer(app)
+            server.add_sockets(sockets)
+            IOLoop.instance().start()
+
+       The `add_sockets` interface is more complicated, but it can be
+       used with `tornado.process.fork_processes` to give you more
+       flexibility in when the fork happens.  ``add_sockets`` can
+       also be used in single-process servers if you want to create
+       your listening sockets in some way other than 
+       `tornado.netutil.bind_sockets`.
     """
     def __init__(self, request_callback, no_keep_alive=False, io_loop=None,
                  xheaders=False, ssl_options=None):
-        """Initializes the server with the given request callback.
-
-        If you use pre-forking/start() instead of the listen() method to
-        start your server, you should not pass an IOLoop instance to this
-        constructor. Each pre-forked child process will create its own
-        IOLoop instance after the forking process.
-        """
         self.request_callback = request_callback
         self.no_keep_alive = no_keep_alive
         self.io_loop = io_loop
         self.xheaders = xheaders
         self.ssl_options = ssl_options
         self._sockets = {}  # fd -> socket object
+        self._pending_sockets = []
         self._started = False
 
     def listen(self, port, address=""):
-        """Binds to the given port and starts the server in a single process.
+        """Starts accepting connections on the given port.
 
-        This method is a shortcut for:
-
-            server.bind(port, address)
-            server.start(1)
-
+        This method may be called more than once to listen on multiple ports.
+        ``listen`` takes effect immediately; it is not necessary to call
+        `HTTPServer.start` afterwards.  It is, however, necessary to start
+        the ``IOLoop``.
         """
-        self.bind(port, address)
-        self.start(1)
+        sockets = netutil.bind_sockets(port, address=address)
+        self.add_sockets(sockets)
 
-    def bind(self, port, address=None, family=socket.AF_UNSPEC):
+    def add_sockets(self, sockets):
+        """Makes this server start accepting connections on the given sockets.
+
+        The ``sockets`` parameter is a list of socket objects such as
+        those returned by `tornado.netutil.bind_sockets`.
+        ``add_sockets`` is typically used in combination with that
+        method and `tornado.process.fork_processes` to provide greater
+        control over the initialization of a multi-process server.
+        """
+        if self.io_loop is None:
+            self.io_loop = ioloop.IOLoop.instance()
+        for sock in sockets:
+            self._sockets[sock.fileno()] = sock
+            self.io_loop.add_handler(sock.fileno(), self._handle_events,
+                                     ioloop.IOLoop.READ)
+
+    def bind(self, port, address=None, family=socket.AF_UNSPEC, backlog=128):
         """Binds this server to the given port on the given address.
 
         To start the server, call start(). If you want to run this server
@@ -178,44 +184,18 @@ class HTTPServer(object):
         or socket.AF_INET6 to restrict to ipv4 or ipv6 addresses, otherwise
         both will be used if available.
 
+        The ``backlog`` argument has the same meaning as for 
+        ``socket.listen()``.
+
         This method may be called multiple times prior to start() to listen
         on multiple ports or interfaces.
         """
-        if address == "":
-            address = None
-        flags = socket.AI_PASSIVE
-        if hasattr(socket, "AI_ADDRCONFIG"):
-            # AI_ADDRCONFIG ensures that we only try to bind on ipv6
-            # if the system is configured for it, but the flag doesn't
-            # exist on some platforms (specifically WinXP, although
-            # newer versions of windows have it)
-            flags |= socket.AI_ADDRCONFIG
-        for res in socket.getaddrinfo(address, port, family, socket.SOCK_STREAM,
-                                      0, flags):
-            af, socktype, proto, canonname, sockaddr = res
-            sock = socket.socket(af, socktype, proto)
-            flags = fcntl.fcntl(sock.fileno(), fcntl.F_GETFD)
-            flags |= fcntl.FD_CLOEXEC
-            fcntl.fcntl(sock.fileno(), fcntl.F_SETFD, flags)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if af == socket.AF_INET6:
-                # On linux, ipv6 sockets accept ipv4 too by default,
-                # but this makes it impossible to bind to both
-                # 0.0.0.0 in ipv4 and :: in ipv6.  On other systems,
-                # separate sockets *must* be used to listen for both ipv4
-                # and ipv6.  For consistency, always disable ipv4 on our
-                # ipv6 sockets and use a separate ipv4 socket when needed.
-                #
-                # Python 2.x on windows doesn't have IPPROTO_IPV6.
-                if hasattr(socket, "IPPROTO_IPV6"):
-                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-            sock.setblocking(0)
-            sock.bind(sockaddr)
-            sock.listen(128)
-            self._sockets[sock.fileno()] = sock
-            if self._started:
-                self.io_loop.add_handler(sock.fileno(), self._handle_events,
-                                         ioloop.IOLoop.READ)
+        sockets = netutil.bind_sockets(port, address=address,
+                                       family=family, backlog=backlog)
+        if self._started:
+            self.add_sockets(sockets)
+        else:
+            self._pending_sockets.extend(sockets)
 
     def start(self, num_processes=1):
         """Starts this server in the IOLoop.
@@ -238,40 +218,11 @@ class HTTPServer(object):
         """
         assert not self._started
         self._started = True
-        if num_processes is None or num_processes <= 0:
-            num_processes = _cpu_count()
-        if num_processes > 1 and ioloop.IOLoop.initialized():
-            logging.error("Cannot run in multiple processes: IOLoop instance "
-                          "has already been initialized. You cannot call "
-                          "IOLoop.instance() before calling start()")
-            num_processes = 1
-        if num_processes > 1:
-            logging.info("Pre-forking %d server processes", num_processes)
-            for i in range(num_processes):
-                if os.fork() == 0:
-                    import random
-                    from binascii import hexlify
-                    try:
-                        # If available, use the same method as
-                        # random.py
-                        seed = long(hexlify(os.urandom(16)), 16)
-                    except NotImplementedError:
-                        # Include the pid to avoid initializing two
-                        # processes to the same value
-                        seed(int(time.time() * 1000) ^ os.getpid())
-                    random.seed(seed)
-                    self.io_loop = ioloop.IOLoop.instance()
-                    for fd in self._sockets.keys():
-                        self.io_loop.add_handler(fd, self._handle_events,
-                                                 ioloop.IOLoop.READ)
-                    return
-            os.waitpid(-1, 0)
-        else:
-            if not self.io_loop:
-                self.io_loop = ioloop.IOLoop.instance()
-            for fd in self._sockets.keys():
-                self.io_loop.add_handler(fd, self._handle_events,
-                                         ioloop.IOLoop.READ)
+        if num_processes != 1:
+            process.fork_processes(num_processes)
+        sockets = self._pending_sockets
+        self._pending_sockets = []
+        self.add_sockets(sockets)
 
     def stop(self):
         """Stops listening for new connections.

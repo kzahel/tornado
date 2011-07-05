@@ -39,6 +39,7 @@
 
    .. automethod:: RequestHandler.set_status
    .. automethod:: RequestHandler.set_header
+   .. automethod:: RequestHandler.set_default_headers
    .. automethod:: RequestHandler.write
    .. automethod:: RequestHandler.flush
    .. automethod:: RequestHandler.finish
@@ -46,7 +47,7 @@
    .. automethod:: RequestHandler.render_string
    .. automethod:: RequestHandler.redirect
    .. automethod:: RequestHandler.send_error
-   .. automethod:: RequestHandler.get_error_html
+   .. automethod:: RequestHandler.write_error
    .. automethod:: RequestHandler.clear
 
 

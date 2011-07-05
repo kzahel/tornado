@@ -17,6 +17,8 @@ class ImportTest(unittest.TestCase):
         import tornado.iostream
         import tornado.locale
         import tornado.options
+        import tornado.netutil
+        import tornado.process
         import tornado.simple_httpclient
         import tornado.stack_context
         import tornado.template
@@ -24,5 +26,4 @@ class ImportTest(unittest.TestCase):
         import tornado.util
         import tornado.web
         import tornado.websocket
-        # import tornado.win32_support  # depends on windows
         import tornado.wsgi

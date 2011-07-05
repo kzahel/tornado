@@ -31,25 +31,19 @@ import heapq
 import os
 import logging
 import select
+import thread
 import time
 import traceback
 
 from tornado import stack_context
-from tornado.escape import utf8
 
 try:
     import signal
 except ImportError:
     signal = None
 
-try:
-    import fcntl
-except ImportError:
-    if os.name == 'nt':
-        from tornado import win32_support
-        from tornado import win32_support as fcntl
-    else:
-        raise
+from tornado.platform.auto import set_close_exec, Waker
+
 
 class IOLoop(object):
     """A level-triggered I/O loop.
@@ -109,29 +103,22 @@ class IOLoop(object):
     def __init__(self, impl=None):
         self._impl = impl or _poll()
         if hasattr(self._impl, 'fileno'):
-            self._set_close_exec(self._impl.fileno())
+            set_close_exec(self._impl.fileno())
         self._handlers = {}
         self._events = {}
         self._callbacks = []
         self._timeouts = []
         self._running = False
         self._stopped = False
+        self._thread_ident = None
         self._blocking_signal_threshold = None
 
         # Create a pipe that we send bogus data to when we want to wake
         # the I/O loop when it is idle
-        if os.name != 'nt':
-            r, w = os.pipe()
-            self._set_nonblocking(r)
-            self._set_nonblocking(w)
-            self._set_close_exec(r)
-            self._set_close_exec(w)
-            self._waker_reader = os.fdopen(r, "rb", 0)
-            self._waker_writer = os.fdopen(w, "wb", 0)
-        else:
-            self._waker_reader = self._waker_writer = win32_support.Pipe()
-            r = self._waker_writer.reader_fd
-        self.add_handler(r, self._read_waker, self.READ)
+        self._waker = Waker()
+        self.add_handler(self._waker.fileno(),
+                         lambda fd, events: self._waker.consume(),
+                         self.READ)
 
     @classmethod
     def instance(cls):
@@ -160,24 +147,18 @@ class IOLoop(object):
 
     def close(self, all_fds=False):
         """Closes the IOLoop, freeing any resources used.
-        
+
         If ``all_fds`` is true, all file descriptors registered on the
         IOLoop will be closed (not just the ones created by the IOLoop itself.
         """
+        self.remove_handler(self._waker.fileno())
         if all_fds:
             for fd in self._handlers.keys()[:]:
-                if fd in (self._waker_reader.fileno(),
-                          self._waker_writer.fileno()):
-                    # Close these through the file objects that wrap them,
-                    # or else the destructor will try to close them later
-                    # and log a warning
-                    continue
                 try:
                     os.close(fd)
                 except Exception:
                     logging.debug("error closing fd %d", fd, exc_info=True)
-        self._waker_reader.close()
-        self._waker_writer.close()
+        self._waker.close()
         self._impl.close()
 
     def add_handler(self, fd, handler, events):
@@ -242,6 +223,7 @@ class IOLoop(object):
         if self._stopped:
             self._stopped = False
             return
+        self._thread_ident = thread.get_ident()
         self._running = True
         while True:
             # Never use an infinite timeout here - it can stall epoll
@@ -253,9 +235,6 @@ class IOLoop(object):
             self._callbacks = []
             for callback in callbacks:
                 self._run_callback(callback)
-
-            if self._callbacks:
-                poll_timeout = 0.0
 
             if self._timeouts:
                 now = time.time()
@@ -270,6 +249,11 @@ class IOLoop(object):
                         milliseconds = self._timeouts[0].deadline - now
                         poll_timeout = min(milliseconds, poll_timeout)
                         break
+
+            if self._callbacks:
+                # If any callbacks or timeouts called add_callback,
+                # we don't want to wait in poll() before we run them.
+                poll_timeout = 0.0
 
             if not self._running:
                 break
@@ -339,7 +323,7 @@ class IOLoop(object):
         """
         self._running = False
         self._stopped = True
-        self._wake()
+        self._waker.wake()
 
     def running(self):
         """Returns true if this IOLoop is currently running."""
@@ -360,7 +344,7 @@ class IOLoop(object):
         The argument is a handle as returned by add_timeout.
         """
         # Removing from a heap is complicated, so just leave the defunct
-        # timeout object in the queue (see discussion in 
+        # timeout object in the queue (see discussion in
         # http://docs.python.org/library/heapq.html).
         # If this turns out to be a problem, we could add a garbage
         # collection pass whenever there are too many dead timeouts.
@@ -375,15 +359,9 @@ class IOLoop(object):
         from that IOLoop's thread.  add_callback() may be used to transfer
         control from other threads to the IOLoop's thread.
         """
-        if not self._callbacks:
-            self._wake()
+        if not self._callbacks and thread.get_ident() != self._thread_ident:
+            self._waker.wake()
         self._callbacks.append(stack_context.wrap(callback))
-
-    def _wake(self):
-        try:
-            self._waker_writer.write(utf8("x"))
-        except IOError:
-            pass
 
     def _run_callback(self, callback):
         try:
@@ -411,22 +389,6 @@ class IOLoop(object):
         except IOError:
             pass
 
-    def _set_nonblocking(self, fd):
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-    def _set_blocking(self, fd):
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
-
-    def _set_nocloseexec(self, fd):
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~fcntl.FD_CLOEXEC)
-
-    def _set_close_exec(self, fd):
-        flags = fcntl.fcntl(fd, fcntl.F_GETFD)
-        fcntl.fcntl(fd, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
-
 
 class _Timeout(object):
     """An IOLoop timeout, a UNIX timestamp and a callback"""
@@ -441,7 +403,7 @@ class _Timeout(object):
     # Comparison methods to sort by deadline, with object id as a tiebreaker
     # to guarantee a consistent ordering.  The heapq module uses __le__
     # in python2.5, and __lt__ in 2.6+ (sort() and most other comparisons
-    # use __lt__).  
+    # use __lt__).
     def __lt__(self, other):
         return ((self.deadline, id(self)) <
                 (other.deadline, id(other)))

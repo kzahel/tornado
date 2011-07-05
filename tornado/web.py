@@ -70,6 +70,7 @@ import stat
 import sys
 import time
 import tornado
+import traceback
 import types
 import urllib
 import urlparse
@@ -80,7 +81,7 @@ from tornado import locale
 from tornado import stack_context
 from tornado import template
 from tornado.escape import utf8, _unicode
-from tornado.util import b, bytes_type
+from tornado.util import b, bytes_type, import_object
 
 try:
     from io import BytesIO  # python 3
@@ -185,11 +186,22 @@ class RequestHandler(object):
             "Server": "TornadoServer/%s" % tornado.version,
             "Content-Type": "text/html; charset=UTF-8",
         }
+        self.set_default_headers()
         if not self.request.supports_http_1_1():
             if self.request.headers.get("Connection") == "Keep-Alive":
                 self.set_header("Connection", "Keep-Alive")
         self._write_buffer = []
         self._status_code = 200
+
+    def set_default_headers(self):
+        """Override this to set HTTP headers at the beginning of the request.
+
+        For example, this is the place to set a custom ``Server`` header.
+        Note that setting such headers in the normal flow of request
+        processing may not do what you want, since headers may be reset
+        during error handling.
+        """
+        pass
 
     def set_status(self, status_code):
         """Sets the status code for our response."""
@@ -432,7 +444,10 @@ class RequestHandler(object):
         wrapped in a dictionary.  More details at
         http://haacked.com/archive/2008/11/20/anatomy-of-a-subtle-json-vulnerability.aspx
         """
-        assert not self._finished
+        if self._finished:
+            raise RuntimeError("Cannot write() after finish().  May be caused "
+                               "by using async operations without the "
+                               "@asynchronous decorator.")
         if isinstance(chunk, dict):
             chunk = escape.json_encode(chunk)
             self.set_header("Content-Type", "application/json; charset=UTF-8")
@@ -594,7 +609,11 @@ class RequestHandler(object):
 
     def finish(self, chunk=None):
         """Finishes this response, ending the HTTP request."""
-        assert not self._finished
+        if self._finished:
+            raise RuntimeError("finish() called twice.  May be caused "
+                               "by using async operations without the "
+                               "@asynchronous decorator.")
+
         if chunk is not None: self.write(chunk)
 
         # Automatically support ETags and add the Content-Length header if
@@ -631,9 +650,13 @@ class RequestHandler(object):
     def send_error(self, status_code=500, **kwargs):
         """Sends the given HTTP error code to the browser.
 
-        We also send the error HTML for the given error code as returned by
-        get_error_html. Override that method if you want custom error pages
-        for your application.
+        If `flush()` has already been called, it is not possible to send
+        an error, so this method will simply terminate the response.
+        If output has been written but not yet flushed, it will be discarded
+        and replaced with the error page.
+
+        Override `write_error()` to customize the error page that is returned.
+        Additional keyword arguments are passed through to `write_error`.
         """
         if self._headers_written:
             logging.error("Cannot send error response after headers written")
@@ -642,25 +665,55 @@ class RequestHandler(object):
             return
         self.clear()
         self.set_status(status_code)
-        message = self.get_error_html(status_code, **kwargs)
-        self.finish(message)
+        try:
+            self.write_error(status_code, **kwargs)
+        except Exception:
+            logging.error("Uncaught exception in write_error", exc_info=True)
+        if not self._finished:
+            self.finish()
 
-    def get_error_html(self, status_code, **kwargs):
+    def write_error(self, status_code, **kwargs):
         """Override to implement custom error pages.
 
-        get_error_html() should return a string containing the error page,
-        and should not produce output via self.write().  If you use a
-        Tornado template for the error page, you must use
-        "return self.render_string(...)" instead of "self.render()".
+        ``write_error`` may call `write`, `render`, `set_header`, etc
+        to produce output as usual.
 
-        If this error was caused by an uncaught exception, the
-        exception object can be found in kwargs e.g. kwargs['exception']
+        If this error was caused by an uncaught exception, an ``exc_info``
+        triple will be available as ``kwargs["exc_info"]``.  Note that this
+        exception may not be the "current" exception for purposes of
+        methods like ``sys.exc_info()`` or ``traceback.format_exc``.
+
+        For historical reasons, if a method ``get_error_html`` exists,
+        it will be used instead of the default ``write_error`` implementation.
+        ``get_error_html`` returned a string instead of producing output
+        normally, and had different semantics for exception handling.
+        Users of ``get_error_html`` are encouraged to convert their code
+        to override ``write_error`` instead.
         """
-        return "<html><title>%(code)d: %(message)s</title>" \
-               "<body>%(code)d: %(message)s</body></html>" % {
-            "code": status_code,
-            "message": httplib.responses[status_code],
-        }
+        if hasattr(self, 'get_error_html'):
+            if 'exc_info' in kwargs:
+                exc_info = kwargs.pop('exc_info')
+                kwargs['exception'] = exc_info[1]
+                try:
+                    # Put the traceback into sys.exc_info()
+                    raise exc_info[0], exc_info[1], exc_info[2]
+                except Exception:
+                    self.finish(self.get_error_html(status_code, **kwargs))
+            else:
+                self.finish(self.get_error_html(status_code, **kwargs))
+            return
+        if self.settings.get("debug") and "exc_info" in kwargs:
+            # in debug mode, try to send a traceback
+            self.set_header('Content-Type', 'text/plain')
+            for line in traceback.format_exception(*kwargs["exc_info"]):
+                self.write(line)
+            self.finish()
+        else:
+            self.finish("<html><title>%(code)d: %(message)s</title>" 
+                        "<body>%(code)d: %(message)s</body></html>" % {
+                    "code": status_code,
+                    "message": httplib.responses[status_code],
+                    })
 
     @property
     def locale(self):
@@ -903,8 +956,7 @@ class RequestHandler(object):
     def _execute(self, transforms, *args, **kwargs):
         """Executes this request with the given output transforms."""
         self._transforms = transforms
-        with stack_context.ExceptionStackContext(
-            self._stack_context_handle_exception):
+        try:
             if self.request.method not in self.SUPPORTED_METHODS:
                 raise HTTPError(405)
             # If XSRF cookies are turned on, reject form submissions without
@@ -920,6 +972,8 @@ class RequestHandler(object):
                 getattr(self, self.request.method.lower())(*args, **kwargs)
                 if self._auto_finish and not self._finished:
                     self.finish()
+        except Exception, e:
+            self._handle_request_exception(e)
 
     def _generate_headers(self):
         lines = [utf8(self.request.version + " " +
@@ -952,13 +1006,13 @@ class RequestHandler(object):
                 logging.warning(format, *args)
             if e.status_code not in httplib.responses:
                 logging.error("Bad HTTP status code: %d", e.status_code)
-                self.send_error(500, exception=e)
+                self.send_error(500, exc_info=sys.exc_info())
             else:
-                self.send_error(e.status_code, exception=e)
+                self.send_error(e.status_code, exc_info=sys.exc_info())
         else:
             logging.error("Uncaught exception %s\n%r", self._request_summary(),
                           self.request, exc_info=True)
-            self.send_error(500, exception=e)
+            self.send_error(500, exc_info=sys.exc_info())
 
     def _ui_module(self, name, module):
         def render(*args, **kwargs):
@@ -998,7 +1052,9 @@ def asynchronous(method):
         if self.application._wsgi:
             raise Exception("@asynchronous is not supported for WSGI apps")
         self._auto_finish = False
-        return method(self, *args, **kwargs)
+        with stack_context.ExceptionStackContext(
+            self._stack_context_handle_exception):
+            return method(self, *args, **kwargs)
     return wrapper
 
 
@@ -1173,6 +1229,12 @@ class Application(object):
                 assert len(spec) in (2, 3)
                 pattern = spec[0]
                 handler = spec[1]
+
+                if isinstance(handler, str):
+                    # import the Module and instantiate the class
+                    # Must be a fully qualified name (module.ClassName)
+                    handler = import_object(handler)
+
                 if len(spec) == 3:
                     kwargs = spec[2]
                 else:

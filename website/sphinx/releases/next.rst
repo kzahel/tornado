@@ -10,6 +10,9 @@ Backwards-incompatible changes
 * Support for secure cookies written by pre-1.0 releases of Tornado has
   been removed.  The `RequestHandler.get_secure_cookie` method no longer
   takes an ``include_name`` parameter.
+* The ``debug`` application setting now causes stack traces to be displayed
+  in the browser on uncaught exceptions.  Since this may leak sensitive
+  information, debug mode is not recommended for public-facing servers.
 
 New features
 ~~~~~~~~~~~~
@@ -25,6 +28,27 @@ New features
 * `tornado.ioloop.IOLoop` and `tornado.httpclient.HTTPClient` now have
   ``close()`` methods that should be used in applications that create
   and destroy many of these objects.
+* `tornado.simple_httpclient` now supports client SSL certificates with the
+  ``client_key`` and ``client_cert`` parameters to
+  `tornado.httpclient.HTTPRequest`
+* `tornado.httpserver.HTTPServer.bind` now takes a backlog argument with the
+  same meaning as ``socket.listen``.
+* In `tornado.web.Application`, handlers may be specified by
+  (fully-qualified) name instead of importing and passing the class object
+  itself.
+* `tornado.web.RequestHandler.set_default_headers` may be overridden to set
+  headers in a way that does not get reset during error handling.
+* `tornado.web.RequestHandler.write_error` replaces ``get_error_html`` as the
+  preferred way to generate custom error pages (``get_error_html`` is still
+  supported, but deprecated)
+* Multi-process mode has been improved, and can now restart crashed child
+  processes.  A new entry point has been added at 
+  `tornado.process.fork_processes`, although
+  `tornado.httpserver.HTTPServer.start` is still supported.
+* To facilitate some advanced multi-process scenarios, ``HTTPServer`` has a
+  new method ``add_sockets``, and socket-opening code is available separately
+  as `tornado.netutil.bind_sockets`.
+
 
 Bug fixes
 ~~~~~~~~~
@@ -34,3 +58,5 @@ Bug fixes
 * `tornado.websocket`: now works on Python 3
 * `SimpleAsyncHTTPClient`: now works with HTTP 1.0 servers that don't send
   a Content-Length header
+* `tornado.iostream.IOStream` should now always call the close callback
+  instead of the connect callback on a connection error.
