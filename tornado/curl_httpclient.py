@@ -272,7 +272,7 @@ def _curl_create(max_simultaneous_connections=None):
 
 
 def _curl_setup_request(curl, request, buffer, headers):
-    curl.setopt(pycurl.URL, request.url)
+    curl.setopt(pycurl.URL, str(request.url)) # xxx: cannot send in unicode strings?
 
     # libcurl's magic "Expect: 100-continue" behavior causes delays
     # with servers that don't support it (which include, among others,
