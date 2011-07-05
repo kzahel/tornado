@@ -24,12 +24,13 @@ import logging
 import pycurl
 import threading
 import time
+import urlparse
 
 from tornado import httputil
 from tornado import ioloop
 from tornado import stack_context
 
-from tornado.escape import utf8
+from tornado.escape import utf8, _unicode
 from tornado.httpclient import HTTPRequest, HTTPResponse, HTTPError, AsyncHTTPClient, main
 
 class CurlAsyncHTTPClient(AsyncHTTPClient):
@@ -305,6 +306,9 @@ def _curl_setup_request(curl, request, buffer, headers):
         curl.setopt(pycurl.WRITEFUNCTION, request.streaming_callback)
     else:
         curl.setopt(pycurl.WRITEFUNCTION, buffer.write)
+    if urlparse.urlsplit(_unicode(request.url)).scheme == 'https' and not request.validate_cert:
+        curl.setopt(pycurl.SSL_VERIFYPEER, 0)
+        curl.setopt(pycurl.SSL_VERIFYHOST, 0)
     curl.setopt(pycurl.FOLLOWLOCATION, request.follow_redirects)
     curl.setopt(pycurl.MAXREDIRS, request.max_redirects)
     curl.setopt(pycurl.CONNECTTIMEOUT, int(request.connect_timeout))
@@ -383,15 +387,17 @@ def _curl_setup_request(curl, request, buffer, headers):
         else:
             curl.setopt(pycurl.INFILESIZE, len(request.body))
 
+    logmethod = 'info' if request.log_request else 'debug'
+
     if request.auth_username and request.auth_password:
         userpwd = "%s:%s" % (request.auth_username, request.auth_password)
         curl.setopt(pycurl.HTTPAUTH, pycurl.HTTPAUTH_BASIC)
         curl.setopt(pycurl.USERPWD, userpwd)
-        logging.debug("%s %s (username: %r)", request.method, request.url,
+        getattr(logging,logmethod)("%s %s (username: %r)", request.method, request.url,
                       request.auth_username)
     else:
         curl.unsetopt(pycurl.USERPWD)
-        logging.debug("%s %s", request.method, request.url)
+        getattr(logging,logmethod)("%s %s", request.method, request.url)
 
     if request.client_key is not None or request.client_cert is not None:
         raise ValueError("Client certificate not supported with curl_httpclient")

@@ -93,6 +93,7 @@ class IOStream(object):
         self._read_until_close = False
         self._read_callback = None
         self._write_callback = None
+        self._write_failure_callback = None
         self._close_callback = None
         self._connect_callback = None
         self._connecting = False

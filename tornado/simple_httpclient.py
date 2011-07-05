@@ -265,6 +265,8 @@ class _HTTPConnection(object):
             self.stream.write(self.request.body)
         self.stream.read_until(b("\r\n\r\n"), self._on_headers)
         if self.request.log_request:
+            logging.info("%s %s", self.request.method, self.request.url)
+        else:
             logging.debug("%s %s", self.request.method, self.request.url)
 
     @contextlib.contextmanager
