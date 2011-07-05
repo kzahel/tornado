@@ -244,7 +244,7 @@ class _HTTPConnection(object):
             self.request.headers["Content-Length"] = str(len(
                 self.request.body))
         else:
-            assert self.request.body is None
+            assert self.request.body in [None, '']
         if (self.request.method == "POST" and
             "Content-Type" not in self.request.headers):
             self.request.headers["Content-Type"] = "application/x-www-form-urlencoded"
@@ -273,6 +273,8 @@ class _HTTPConnection(object):
     def cleanup(self):
         try:
             yield
+        except AssertionError, e:
+            raise e
         except Exception, e:
             if e.args[0] not in [errno.ECONNREFUSED]:
                 logging.warning("uncaught exception", exc_info=True)
