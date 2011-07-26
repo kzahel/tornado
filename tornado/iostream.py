@@ -332,8 +332,8 @@ class IOStream(object):
         except socket.error, e:
             if e.args[0] not in [errno.ECONNREFUSED]:
                 # ssl.SSLError is a subclass of socket.error
-                logging.warning("Read error on %d: %s",
-                                self.socket.fileno(), e)
+                logging.info("Read error on %d: %s",
+                             self.socket.fileno(), e)
             self.close()
             raise
         if chunk is None:
