@@ -247,7 +247,7 @@ class _HTTPConnection(object):
             if self.request.method in ("POST", "PUT"):
                 assert self.request.body is not None
             else:
-                assert self.request.body is None
+                assert self.request.body in [None,'']
         if self.request.body is not None:
             self.request.headers["Content-Length"] = str(len(
                 self.request.body))
