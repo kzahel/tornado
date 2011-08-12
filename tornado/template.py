@@ -121,7 +121,8 @@ class Template(object):
         self.file = _File(_parse(reader, self))
         self.code = self._generate_python(loader, compress_whitespace)
         try:
-            self.compiled = compile(self.code, "<template %s>" % self.name,
+            self.compiled = compile(escape.to_unicode(self.code),
+                                    "<template %s>" % self.name,
                                     "exec")
         except Exception:
             formatted_code = _format_code(self.code).rstrip()
@@ -413,7 +414,7 @@ class _Expression(_Node):
 
 class _Module(_Expression):
     def __init__(self, expression):
-        super(_Module, self).__init__("modules." + expression,
+        super(_Module, self).__init__("_modules." + expression,
                                       raw=True)
 
 class _Text(_Node):

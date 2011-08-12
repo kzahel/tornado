@@ -26,12 +26,16 @@ In addition to I/O events, the `IOLoop` can also schedule time-based events.
 `IOLoop.add_timeout` is a non-blocking alternative to `time.sleep`.
 """
 
+from __future__ import with_statement
+
+import datetime
 import errno
 import heapq
 import os
 import logging
 import select
 import thread
+import threading
 import time
 import traceback
 
@@ -108,6 +112,7 @@ class IOLoop(object):
         self._handlers = {}
         self._events = {}
         self._callbacks = []
+        self._callback_lock = threading.Lock()
         self._timeouts = []
         self._running = False
         self._stopped = False
@@ -121,8 +126,8 @@ class IOLoop(object):
                          lambda fd, events: self._waker.consume(),
                          self.READ)
 
-    @classmethod
-    def instance(cls):
+    @staticmethod
+    def instance():
         """Returns a global IOLoop instance.
 
         Most single-threaded applications have a single, global IOLoop.
@@ -137,14 +142,24 @@ class IOLoop(object):
                 def __init__(self, io_loop=None):
                     self.io_loop = io_loop or IOLoop.instance()
         """
-        if not hasattr(cls, "_instance"):
-            cls._instance = cls()
-        return cls._instance
+        if not hasattr(IOLoop, "_instance"):
+            IOLoop._instance = IOLoop()
+        return IOLoop._instance
 
-    @classmethod
-    def initialized(cls):
+    @staticmethod
+    def initialized():
         """Returns true if the singleton instance has been created."""
-        return hasattr(cls, "_instance")
+        return hasattr(IOLoop, "_instance")
+
+    def install(self):
+        """Installs this IOloop object as the singleton instance.
+
+        This is normally not necessary as `instance()` will create
+        an IOLoop on demand, but you may want to call `install` to use
+        a custom subclass of IOLoop.
+        """
+        assert not IOLoop.initialized()
+        IOLoop._instance = self
 
     def close(self, all_fds=False):
         """Closes the IOLoop, freeing any resources used.
@@ -232,8 +247,9 @@ class IOLoop(object):
 
             # Prevent IO event starvation by delaying new callbacks
             # to the next iteration of the event loop.
-            callbacks = self._callbacks
-            self._callbacks = []
+            with self._callback_lock:
+                callbacks = self._callbacks
+                self._callbacks = []
             for callback in callbacks:
                 self._run_callback(callback)
 
@@ -334,6 +350,10 @@ class IOLoop(object):
         """Calls the given callback at the time deadline from the I/O loop.
 
         Returns a handle that may be passed to remove_timeout to cancel.
+
+        ``deadline`` may be a number denoting a unix timestamp (as returned
+        by ``time.time()`` or a ``datetime.timedelta`` object for a deadline
+        relative to the current time.
         """
         timeout = _Timeout(deadline, stack_context.wrap(callback))
         heapq.heappush(self._timeouts, timeout)
@@ -360,9 +380,17 @@ class IOLoop(object):
         from that IOLoop's thread.  add_callback() may be used to transfer
         control from other threads to the IOLoop's thread.
         """
-        if not self._callbacks and thread.get_ident() != self._thread_ident:
+        with self._callback_lock:
+            list_empty = not self._callbacks
+            self._callbacks.append(stack_context.wrap(callback))
+        if list_empty and thread.get_ident() != self._thread_ident:
+            # If we're in the IOLoop's thread, we know it's not currently
+            # polling.  If we're not, and we added the first callback to an
+            # empty list, we may need to wake it up (it may wake up on its
+            # own, but an occasional extra wake is harmless).  Waking
+            # up a polling IOLoop is relatively expensive, so we try to
+            # avoid it when we can.
             self._waker.wake()
-        self._callbacks.append(stack_context.wrap(callback))
 
     def _run_callback(self, callback):
         try:
@@ -398,7 +426,12 @@ class _Timeout(object):
     __slots__ = ['deadline', 'callback']
 
     def __init__(self, deadline, callback):
-        self.deadline = deadline
+        if isinstance(deadline, (int, long, float)):
+            self.deadline = deadline
+        elif isinstance(deadline, datetime.timedelta):
+            self.deadline = time.time() + deadline.total_seconds()
+        else:
+            raise TypeError("Unsupported deadline %r" % deadline)
         self.callback = callback
 
     # Comparison methods to sort by deadline, with object id as a tiebreaker
@@ -430,8 +463,8 @@ class PeriodicCallback(object):
     def start(self):
         """Starts the timer."""
         self._running = True
-        timeout = time.time() + self.callback_time / 1000.0
-        self.io_loop.add_timeout(timeout, self._run)
+        self._next_timeout = time.time()
+        self._schedule_next()
 
     def stop(self):
         """Stops the timer."""
@@ -443,8 +476,14 @@ class PeriodicCallback(object):
             self.callback()
         except Exception:
             logging.error("Error in periodic callback", exc_info=True)
+        self._schedule_next()
+
+    def _schedule_next(self):
         if self._running:
-            self.start()
+            current_time = time.time()
+            while self._next_timeout < current_time:
+                self._next_timeout += self.callback_time / 1000.0
+            self.io_loop.add_timeout(self._next_timeout, self._run)
 
 
 class _EPoll(object):

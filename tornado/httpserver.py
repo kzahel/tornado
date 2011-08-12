@@ -167,8 +167,12 @@ class HTTPServer(object):
             self.io_loop = ioloop.IOLoop.instance()
         for sock in sockets:
             self._sockets[sock.fileno()] = sock
-            self.io_loop.add_handler(sock.fileno(), self._handle_events,
-                                     ioloop.IOLoop.READ)
+            netutil.add_accept_handler(sock, self._handle_connection,
+                                       io_loop=self.io_loop)
+
+    def add_socket(self, socket):
+        """Singular version of `add_sockets`.  Takes a single socket object."""
+        self.add_sockets([socket])
 
     def bind(self, port, address=None, family=socket.AF_UNSPEC, backlog=128):
         """Binds this server to the given port on the given address.
@@ -234,40 +238,36 @@ class HTTPServer(object):
             self.io_loop.remove_handler(fd)
             sock.close()
 
-    def _handle_events(self, fd, events):
-        while True:
+    def _handle_connection(self, connection, address):
+        if self.ssl_options is not None:
+            assert ssl, "Python 2.6+ and OpenSSL required for SSL"
             try:
-                connection, address = self._sockets[fd].accept()
-            except socket.error, e:
-                if e.args[0] in (errno.EWOULDBLOCK, errno.EAGAIN):
-                    return
-                raise
-            if self.ssl_options is not None:
-                assert ssl, "Python 2.6+ and OpenSSL required for SSL"
-                try:
-                    connection = ssl.wrap_socket(connection,
-                                                 server_side=True,
-                                                 do_handshake_on_connect=False,
-                                                 **self.ssl_options)
-                except ssl.SSLError, err:
-                    if err.args[0] == ssl.SSL_ERROR_EOF:
-                        return connection.close()
-                    else:
-                        raise
-                except socket.error, err:
-                    if err.args[0] == errno.ECONNABORTED:
-                        return connection.close()
-                    else:
-                        raise
-            try:
-                if self.ssl_options is not None:
-                    stream = iostream.SSLIOStream(connection, io_loop=self.io_loop)
+                connection = ssl.wrap_socket(connection,
+                                             server_side=True,
+                                             do_handshake_on_connect=False,
+                                             **self.ssl_options)
+            except ssl.SSLError, err:
+                if err.args[0] == ssl.SSL_ERROR_EOF:
+                    return connection.close()
                 else:
-                    stream = iostream.IOStream(connection, io_loop=self.io_loop)
-                HTTPConnection(stream, address, self.request_callback,
-                               self.no_keep_alive, self.xheaders)
-            except Exception:
-                logging.error("Error in connection callback", exc_info=True)
+                    raise
+            except socket.error, err:
+                if err.args[0] == errno.ECONNABORTED:
+                    return connection.close()
+                else:
+                    raise
+        try:
+            if self.ssl_options is not None:
+                stream = iostream.SSLIOStream(connection, io_loop=self.io_loop)
+            else:
+                stream = iostream.IOStream(connection, io_loop=self.io_loop)
+            if connection.family not in (socket.AF_INET, socket.AF_INET6):
+                # Unix (or other) socket; fake the remote address
+                address = ('0.0.0.0', 0)
+            HTTPConnection(stream, address, self.request_callback,
+                           self.no_keep_alive, self.xheaders)
+        except Exception:
+            logging.error("Error in connection callback", exc_info=True)
 
 class _BadRequestException(Exception):
     """Exception class for malformed HTTP requests."""
@@ -293,11 +293,13 @@ class HTTPConnection(object):
         # contexts from one request from leaking into the next.
         self._header_callback = stack_context.wrap(self._on_headers)
         self.stream.read_until(b("\r\n\r\n"), self._header_callback)
+        self._write_callback = None
 
-    def write(self, chunk):
+    def write(self, chunk, callback=None):
         """Writes a chunk of output to the stream."""
         assert self._request, "Request closed"
         if not self.stream.closed():
+            self._write_callback = stack_context.wrap(callback)
             self.stream.write(chunk, self._on_write_complete)
 
     def finish(self):
@@ -308,6 +310,10 @@ class HTTPConnection(object):
             self._finish_request()
 
     def _on_write_complete(self):
+        if self._write_callback is not None:
+            callback = self._write_callback
+            self._write_callback = None
+            callback()            
         if self._request_finished:
             self._finish_request()
 
@@ -506,10 +512,10 @@ class HTTPRequest(object):
         """Returns True if this request supports HTTP/1.1 semantics"""
         return self.version == "HTTP/1.1"
 
-    def write(self, chunk):
+    def write(self, chunk, callback=None):
         """Writes the given chunk to the response stream."""
         assert isinstance(chunk, bytes_type)
-        self.connection.write(chunk)
+        self.connection.write(chunk, callback=callback)
 
     def finish(self):
         """Finishes this HTTP request on the open connection."""

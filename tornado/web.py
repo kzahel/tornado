@@ -62,6 +62,7 @@ import gzip
 import hashlib
 import hmac
 import httplib
+import itertools
 import logging
 import mimetypes
 import os.path
@@ -106,8 +107,14 @@ class RequestHandler(object):
         self._transforms = None  # will be set in _execute
         self.ui = _O((n, self._ui_method(m)) for n, m in
                      application.ui_methods.iteritems())
-        self.ui["modules"] = _O((n, self._ui_module(n, m)) for n, m in
-                                application.ui_modules.iteritems())
+        # UIModules are available as both `modules` and `_modules` in the
+        # template namespace.  Historically only `modules` was available
+        # but could be clobbered by user additions to the namespace.
+        # The template {% module %} directive looks in `_modules` to avoid
+        # possible conflicts.
+        self.ui["_modules"] = _O((n, self._ui_module(n, m)) for n, m in
+                                 application.ui_modules.iteritems())
+        self.ui["modules"] = self.ui["_modules"]
         self.clear()
         # Check since connection is not available in WSGI
         if hasattr(self.request, "connection"):
@@ -182,10 +189,16 @@ class RequestHandler(object):
 
     def clear(self):
         """Resets all headers and content for this response."""
+        # The performance cost of tornado.httputil.HTTPHeaders is significant
+        # (slowing down a benchmark with a trivial handler by more than 10%),
+        # and its case-normalization is not generally necessary for 
+        # headers we generate on the server side, so use a plain dict
+        # and list instead.
         self._headers = {
             "Server": "TornadoServer/%s" % tornado.version,
             "Content-Type": "text/html; charset=UTF-8",
         }
+        self._list_headers = []
         self.set_default_headers()
         if not self.request.supports_http_1_1():
             if self.request.headers.get("Connection") == "Keep-Alive":
@@ -219,22 +232,36 @@ class RequestHandler(object):
         HTTP specification. If the value is not a string, we convert it to
         a string. All header values are then encoded as UTF-8.
         """
-        if isinstance(value, (unicode, bytes_type)):
-            value = utf8(value)
-            # If \n is allowed into the header, it is possible to inject
-            # additional headers or split the request. Also cap length to
-            # prevent obviously erroneous values.
-            safe_value = re.sub(b(r"[\x00-\x1f]"), b(" "), value)[:4000]
-            if safe_value != value:
-                raise ValueError("Unsafe header value %r", value)
+        self._headers[name] = self._convert_header_value(value)
+
+    def add_header(self, name, value):
+        """Adds the given response header and value.
+
+        Unlike `set_header`, `add_header` may be called multiple times
+        to return multiple values for the same header.
+        """
+        self._list_headers.append((name, self._convert_header_value(value)))
+
+    def _convert_header_value(self, value):
+        if isinstance(value, bytes_type):
+            pass
+        elif isinstance(value, unicode):
+            value = value.encode('utf-8')
+        elif isinstance(value, (int, long)):
+            # return immediately since we know the converted value will be safe
+            return str(value)
         elif isinstance(value, datetime.datetime):
             t = calendar.timegm(value.utctimetuple())
-            value = email.utils.formatdate(t, localtime=False, usegmt=True)
-        elif isinstance(value, int) or isinstance(value, long):
-            value = str(value)
+            return email.utils.formatdate(t, localtime=False, usegmt=True)
         else:
             raise TypeError("Unsupported header value %r" % value)
-        self._headers[name] = value
+        # If \n is allowed into the header, it is possible to inject
+        # additional headers or split the request. Also cap length to
+        # prevent obviously erroneous values.
+        if len(value) > 4000 or re.match(b(r"[\x00-\x1f]"), value):
+            raise ValueError("Unsafe header value %r", value)
+        return value
+
 
     _ARG_DEFAULT = []
     def get_argument(self, name, default=_ARG_DEFAULT, strip=True):
@@ -293,7 +320,7 @@ class RequestHandler(object):
     def cookies(self):
         """A dictionary of Cookie.Morsel objects."""
         if not hasattr(self, "_cookies"):
-            self._cookies = Cookie.BaseCookie()
+            self._cookies = Cookie.SimpleCookie()
             if "Cookie" in self.request.headers:
                 try:
                     self._cookies.load(
@@ -325,7 +352,7 @@ class RequestHandler(object):
             raise ValueError("Invalid cookie %r: %r" % (name, value))
         if not hasattr(self, "_new_cookies"):
             self._new_cookies = []
-        new_cookie = Cookie.BaseCookie()
+        new_cookie = Cookie.SimpleCookie()
         self._new_cookies.append(new_cookie)
         new_cookie[name] = value
         if domain:
@@ -581,8 +608,15 @@ class RequestHandler(object):
         return template.Loader(template_path, **kwargs)
 
 
-    def flush(self, include_footers=False):
-        """Flushes the current output buffer to the network."""
+    def flush(self, include_footers=False, callback=None):
+        """Flushes the current output buffer to the network.
+        
+        The ``callback`` argument, if given, can be used for flow control:
+        it will be run when all flushed data has been written to the socket.
+        Note that only one flush callback can be outstanding at a time;
+        if another flush occurs before the previous flush's callback
+        has been run, the previous callback will be discarded.
+        """
         if self.application._wsgi:
             raise Exception("WSGI applications do not support flush()")
 
@@ -601,11 +635,11 @@ class RequestHandler(object):
 
         # Ignore the chunk and only write the headers for HEAD requests
         if self.request.method == "HEAD":
-            if headers: self.request.write(headers)
+            if headers: self.request.write(headers, callback=callback)
             return
 
         if headers or chunk:
-            self.request.write(headers + chunk)
+            self.request.write(headers + chunk, callback=callback)
 
     def finish(self, chunk=None):
         """Finishes this response, ending the HTTP request."""
@@ -979,7 +1013,8 @@ class RequestHandler(object):
         lines = [utf8(self.request.version + " " +
                       str(self._status_code) +
                       " " + httplib.responses[self._status_code])]
-        lines.extend([(utf8(n) + b(": ") + utf8(v)) for n, v in self._headers.iteritems()])
+        lines.extend([(utf8(n) + b(": ") + utf8(v)) for n, v in 
+                      itertools.chain(self._headers.iteritems(), self._list_headers)])
         for cookie_dict in getattr(self, "_new_cookies", []):
             for cookie in cookie_dict.values():
                 lines.append(utf8("Set-Cookie: " + cookie.OutputString(None)))
@@ -1305,23 +1340,25 @@ class Application(object):
             for spec in handlers:
                 match = spec.regex.match(request.path)
                 if match:
-                    # None-safe wrapper around url_unescape to handle
-                    # unmatched optional groups correctly
-                    def unquote(s):
-                        if s is None: return s
-                        return escape.url_unescape(s, encoding=None)
                     handler = spec.handler_class(self, request, **spec.kwargs)
-                    # Pass matched groups to the handler.  Since
-                    # match.groups() includes both named and unnamed groups,
-                    # we want to use either groups or groupdict but not both.
-                    # Note that args are passed as bytes so the handler can
-                    # decide what encoding to use.
-                    kwargs = dict((k, unquote(v))
-                                  for (k, v) in match.groupdict().iteritems())
-                    if kwargs:
-                        args = []
-                    else:
-                        args = [unquote(s) for s in match.groups()]
+                    if spec.regex.groups:
+                        # None-safe wrapper around url_unescape to handle
+                        # unmatched optional groups correctly
+                        def unquote(s):
+                            if s is None: return s
+                            return escape.url_unescape(s, encoding=None)
+                        # Pass matched groups to the handler.  Since
+                        # match.groups() includes both named and unnamed groups,
+                        # we want to use either groups or groupdict but not both.
+                        # Note that args are passed as bytes so the handler can
+                        # decide what encoding to use.
+
+                        if spec.regex.groupindex:
+                            kwargs = dict(
+                                (k, unquote(v))
+                                for (k, v) in match.groupdict().iteritems())
+                        else:
+                            args = [unquote(s) for s in match.groups()]
                     break
             if not handler:
                 handler = ErrorHandler(self, request, status_code=404)
@@ -1427,8 +1464,11 @@ class StaticFileHandler(RequestHandler):
     To support aggressive browser caching, if the argument "v" is given
     with the path, we set an infinite HTTP expiration header. So, if you
     want browsers to cache a file indefinitely, send them to, e.g.,
-    /static/images/myimage.png?v=xxx.
+    /static/images/myimage.png?v=xxx. Override ``get_cache_time`` method for
+    more fine-grained cache control.
     """
+    CACHE_MAX_AGE = 86400*365*10 #10 years
+
     def initialize(self, path, default_filename=None):
         self.root = os.path.abspath(path) + os.path.sep
         self.default_filename = default_filename
@@ -1461,15 +1501,19 @@ class StaticFileHandler(RequestHandler):
         modified = datetime.datetime.fromtimestamp(stat_result[stat.ST_MTIME])
 
         self.set_header("Last-Modified", modified)
-        if "v" in self.request.arguments:
-            self.set_header("Expires", datetime.datetime.utcnow() + \
-                                       datetime.timedelta(days=365*10))
-            self.set_header("Cache-Control", "max-age=" + str(86400*365*10))
-        else:
-            self.set_header("Cache-Control", "public")
+
         mime_type, encoding = mimetypes.guess_type(abspath)
         if mime_type:
             self.set_header("Content-Type", mime_type)
+
+        cache_time = self.get_cache_time(path, modified, mime_type)
+
+        if cache_time > 0:
+            self.set_header("Expires", datetime.datetime.utcnow() + \
+                                       datetime.timedelta(seconds=cache_time))
+            self.set_header("Cache-Control", "max-age=" + str(cache_time))
+        else:
+            self.set_header("Cache-Control", "public")
 
         self.set_extra_headers(path)
 
@@ -1494,6 +1538,17 @@ class StaticFileHandler(RequestHandler):
     def set_extra_headers(self, path):
         """For subclass to add extra headers to the response"""
         pass
+
+    def get_cache_time(self, path, modified, mime_type):
+        """Override to customize cache control behavior.
+
+        Return a positive number of seconds to trigger aggressive caching or 0
+        to mark resource as cacheable, only.
+
+        By default returns cache expiry of 10 years for resources requested
+        with "v" argument.
+        """
+        return self.CACHE_MAX_AGE if "v" in self.request.arguments else 0
 
 
 class FallbackHandler(RequestHandler):
@@ -1562,7 +1617,6 @@ class GZipContentEncoding(OutputTransform):
             headers["Content-Encoding"] = "gzip"
             self._gzip_value = BytesIO()
             self._gzip_file = gzip.GzipFile(mode="w", fileobj=self._gzip_value)
-            self._gzip_pos = 0
             chunk = self.transform_chunk(chunk, finishing)
             if "Content-Length" in headers:
                 headers["Content-Length"] = str(len(chunk))
@@ -1576,9 +1630,8 @@ class GZipContentEncoding(OutputTransform):
             else:
                 self._gzip_file.flush()
             chunk = self._gzip_value.getvalue()
-            if self._gzip_pos > 0:
-                chunk = chunk[self._gzip_pos:]
-            self._gzip_pos += len(chunk)
+            self._gzip_value.truncate(0)
+            self._gzip_value.seek(0)
         return chunk
 
 
@@ -1777,6 +1830,9 @@ class URLSpec(object):
         if not pattern.endswith('$'):
             pattern += '$'
         self.regex = re.compile(pattern)
+        assert len(self.regex.groupindex) in (0, self.regex.groups), \
+            ("groups in url regexes must either be all named or all "
+             "positional: %r" % self.regex.pattern)
         self.handler_class = handler_class
         self.kwargs = kwargs
         self.name = name

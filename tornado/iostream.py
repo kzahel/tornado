@@ -97,10 +97,8 @@ class IOStream(object):
         self._close_callback = None
         self._connect_callback = None
         self._connecting = False
-        self._state = self.io_loop.ERROR
-        with stack_context.NullContext():
-            self.io_loop.add_handler(
-                self.socket.fileno(), self._handle_events, self._state)
+        self._state = None
+        self._pending_callbacks = 0
 
     def connect(self, address, callback=None):
         """Connects the socket to a remote address without blocking.
@@ -145,6 +143,7 @@ class IOStream(object):
     def read_bytes(self, num_bytes, callback):
         """Call callback when we read the given number of bytes."""
         assert not self._read_callback, "Already reading"
+        assert isinstance(num_bytes, int)
         self._read_bytes = num_bytes
         self._read_callback = stack_context.wrap(callback)
         while True:
@@ -179,9 +178,12 @@ class IOStream(object):
         assert isinstance(data, bytes_type)
         self._check_closed()
         self._write_buffer.append(data)
-        self._add_io_state(self.io_loop.WRITE)
         self._write_callback = stack_context.wrap(callback)
         self._write_failure_callback = stack_context.wrap(failure_callback)
+        self._handle_write()
+        if self._write_buffer:
+            self._add_io_state(self.io_loop.WRITE)
+        self._maybe_add_error_listener()
 
     def set_close_callback(self, callback):
         """Call the given callback when the stream is closed."""
@@ -196,15 +198,20 @@ class IOStream(object):
                 self._read_until_close = False
                 self._run_callback(callback,
                                    self._consume(self._read_buffer_size))
-            self.io_loop.remove_handler(self.socket.fileno())
+            if self._state is not None:
+                self.io_loop.remove_handler(self.socket.fileno())
             self.socket.close()
             self.socket = None
             if self._write_failure_callback:
                 # check if there's a write buffer and if stuff in it then run the write failure callback
                 if sum( map(len, self._write_buffer) ) > 0:
                     self._run_callback(self._write_failure_callback)
-            if self._close_callback:
-                self._run_callback(self._close_callback)
+            if self._close_callback and self._pending_callbacks == 0:
+                # if there are pending callbacks, don't run the close callback
+                # until they're done (see _maybe_add_error_handler)
+                cb = self._close_callback
+                self._close_callback = None
+                self._run_callback(cb)
 
     def reading(self):
         """Returns true if we are currently reading from the stream."""
@@ -245,6 +252,8 @@ class IOStream(object):
             if self.writing():
                 state |= self.io_loop.WRITE
             if state != self._state:
+                assert self._state is not None, \
+                    "shouldn't happen: _handle_events without self._state"
                 self._state = state
                 self.io_loop.update_handler(self.socket.fileno(), self._state)
         except Exception:
@@ -255,6 +264,7 @@ class IOStream(object):
 
     def _run_callback(self, callback, *args):
         def wrapper():
+            self._pending_callbacks -= 1
             try:
                 callback(*args)
             except Exception:
@@ -268,6 +278,7 @@ class IOStream(object):
                 # Re-raise the exception so that IOLoop.handle_callback_exception
                 # can see it and log the error
                 raise
+            self._maybe_add_error_listener()
         # We schedule callbacks to be run on the next IOLoop iteration
         # rather than running them directly for several reasons:
         # * Prevents unbounded stack growth when a callback calls an
@@ -282,6 +293,7 @@ class IOStream(object):
             # important if the callback was pre-wrapped before entry to
             # IOStream (as in HTTPConnection._header_callback), as we could
             # capture and leak the wrong context here.
+            self._pending_callbacks += 1
             self.io_loop.add_callback(wrapper)
 
     def _handle_read(self):
@@ -440,11 +452,46 @@ class IOStream(object):
         if not self.socket:
             raise IOError("Stream is closed")
 
+    def _maybe_add_error_listener(self):
+        if self._state is None and self._pending_callbacks == 0:
+            if self.socket is None:
+                cb = self._close_callback
+                if cb is not None:
+                    self._close_callback = None
+                    self._run_callback(cb)
+            else:
+                self._add_io_state(0)
+
     def _add_io_state(self, state):
+        """Adds `state` (IOLoop.{READ,WRITE} flags) to our event handler.
+
+        Implementation notes: Reads and writes have a fast path and a
+        slow path.  The fast path reads synchronously from socket
+        buffers, while the slow path uses `_add_io_state` to schedule
+        an IOLoop callback.  Note that in both cases, the callback is
+        run asynchronously with `_run_callback`.
+
+        To detect closed connections, we must have called
+        `_add_io_state` at some point, but we want to delay this as
+        much as possible so we don't have to set an `IOLoop.ERROR`
+        listener that will be overwritten by the next slow-path
+        operation.  As long as there are callbacks scheduled for
+        fast-path ops, those callbacks may do more reads.
+        If a sequence of fast-path ops do not end in a slow-path op,
+        (e.g. for an @asynchronous long-poll request), we must add
+        the error handler.  This is done in `_run_callback` and `write`
+        (since the write callback is optional so we can have a
+        fast-path write with no `_run_callback`)
+        """
         if self.socket is None:
             # connection has been closed, so there can be no future events
             return
-        if not self._state & state:
+        if self._state is None:
+            self._state = ioloop.IOLoop.ERROR | state
+            with stack_context.NullContext():
+                self.io_loop.add_handler(
+                    self.socket.fileno(), self._handle_events, self._state)
+        elif not self._state & state:
             self._state = self._state | state
             self.io_loop.update_handler(self.socket.fileno(), self._state)
 

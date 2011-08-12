@@ -16,8 +16,12 @@
 
 """Miscellaneous network utility code."""
 
+import errno
+import os
 import socket
+import stat
 
+from tornado.ioloop import IOLoop
 from tornado.platform.auto import set_close_exec
 
 def bind_sockets(port, address=None, family=socket.AF_UNSPEC, backlog=128):
@@ -69,3 +73,55 @@ def bind_sockets(port, address=None, family=socket.AF_UNSPEC, backlog=128):
         sock.listen(backlog)
         sockets.append(sock)
     return sockets
+
+if hasattr(socket, 'AF_UNIX'):
+    def bind_unix_socket(file, mode=0600, backlog=128):
+        """Creates a listening unix socket.
+
+        If a socket with the given name already exists, it will be deleted.
+        If any other file with that name exists, an exception will be
+        raised.
+
+        Returns a socket object (not a list of socket objects like 
+        `bind_sockets`)
+        """
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        set_close_exec(sock.fileno())
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setblocking(0)
+        try:
+            st = os.stat(file)
+        except OSError, err:
+            if err.errno != errno.ENOENT:
+                raise
+        else:
+            if stat.S_ISSOCK(st.st_mode):
+                os.remove(file)
+            else:
+                raise ValueError("File %s exists and is not a socket", file)
+        sock.bind(file)
+        os.chmod(file, mode)
+        sock.listen(backlog)
+        return sock
+
+def add_accept_handler(sock, callback, io_loop=None):
+    """Adds an ``IOLoop`` event handler to accept new connections on ``sock``.
+
+    When a connection is accepted, ``callback(connection, address)`` will
+    be run (``connection`` is a socket object, and ``address`` is the
+    address of the other end of the connection).  Note that this signature
+    is different from the ``callback(fd, events)`` signature used for
+    ``IOLoop`` handlers.
+    """
+    if io_loop is None:
+        io_loop = IOLoop.instance()
+    def accept_handler(fd, events):
+        while True:
+            try:
+                connection, address = sock.accept()
+            except socket.error, e:
+                if e.args[0] in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    return
+                raise
+            callback(connection, address)
+    io_loop.add_handler(sock.fileno(), accept_handler, IOLoop.READ)
