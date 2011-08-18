@@ -92,6 +92,7 @@ class IOStream(object):
         self._read_bytes = None
         self._read_until_close = False
         self._read_callback = None
+        self._read_failure_callback = None
         self._write_callback = None
         self._write_failure_callback = None
         self._close_callback = None
@@ -140,12 +141,13 @@ class IOStream(object):
                 break
         self._add_io_state(self.io_loop.READ)
 
-    def read_bytes(self, num_bytes, callback):
+    def read_bytes(self, num_bytes, callback, failure_callback=None):
         """Call callback when we read the given number of bytes."""
         assert not self._read_callback, "Already reading"
         assert isinstance(num_bytes, int)
         self._read_bytes = num_bytes
         self._read_callback = stack_context.wrap(callback)
+        self._read_failure_callback = stack_context.wrap(failure_callback)
         while True:
             if self._read_from_buffer():
                 return
@@ -202,6 +204,9 @@ class IOStream(object):
                 self.io_loop.remove_handler(self.socket.fileno())
             self.socket.close()
             self.socket = None
+            if self._read_bytes is not None:
+                if self._read_failure_callback:
+                    self._run_callback(self._read_failure_callback)
             if self._write_failure_callback:
                 # check if there's a write buffer and if stuff in it then run the write failure callback
                 if sum( map(len, self._write_buffer) ) > 0:
@@ -368,6 +373,7 @@ class IOStream(object):
                 num_bytes = self._read_bytes
                 callback = self._read_callback
                 self._read_callback = None
+                self._read_failure_callback = None
                 self._read_bytes = None
                 self._run_callback(callback, self._consume(num_bytes))
                 return True
@@ -378,6 +384,7 @@ class IOStream(object):
                 callback = self._read_callback
                 delimiter_len = len(self._read_delimiter)
                 self._read_callback = None
+                self._read_failure_callback = None
                 self._read_delimiter = None
                 self._run_callback(callback,
                                    self._consume(loc + delimiter_len))
@@ -433,7 +440,10 @@ class IOStream(object):
                 else:
                     logging.warning("Write error on %d: %s",
                                     self.socket.fileno(), e)
-                    # do I need to run write failure callback here?
+                    # do I need to run write failure callback here? (YES)
+                    if self._write_failure_callback:
+                        self._run_callback(self._write_failure_callback)
+                    import pdb; pdb.set_trace()
                     self.close()
                     return
         if not self._write_buffer and self._write_callback:

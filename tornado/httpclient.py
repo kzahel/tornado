@@ -203,6 +203,7 @@ class HTTPRequest(object):
                  max_redirects=5, user_agent=None, use_gzip=True,
                  network_interface=None, streaming_callback=None,
                  header_callback=None, prepare_curl_callback=None,
+                 headers_callback=None,
                  proxy_host=None, proxy_port=None, proxy_username=None,
                  proxy_password='', allow_nonstandard_methods=False,
                  validate_cert=True, ca_certs=None,
@@ -284,6 +285,7 @@ class HTTPRequest(object):
         self.network_interface = network_interface
         self.streaming_callback = streaming_callback
         self.header_callback = header_callback
+        self.headers_callback = headers_callback
         self.prepare_curl_callback = prepare_curl_callback
         self.allow_nonstandard_methods = allow_nonstandard_methods
         self.validate_cert = validate_cert

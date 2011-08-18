@@ -100,7 +100,7 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
         self.queue.append((request, callback))
         self._process_queue()
         if self.queue:
-            logging.debug("max_clients limit reached, request queued. "
+            logging.info("max_clients limit reached, request queued. "
                           "%d active, %d queued requests." % (
                     len(self.active), len(self.queue)))
 
@@ -195,6 +195,7 @@ class _HTTPConnection(object):
                                        io_loop=self.io_loop,
                                        max_buffer_size=max_buffer_size)
             timeout = min(request.connect_timeout, request.request_timeout)
+            if self.request.headers_callback: self._run_callback(HTTPResponse(self.request,599,error=HTTPError(598,"No Error")))
             if timeout:
                 self._connect_timeout = self.io_loop.add_timeout(
                     self.start_time + timeout,
@@ -312,7 +313,10 @@ class _HTTPConnection(object):
         match = re.match("HTTP/1.[01] ([0-9]+)", first_line)
         assert match
         self.code = int(match.group(1))
+        self.raw_headers = data
         self.headers = HTTPHeaders.parse(header_data)
+        if self.request.headers_callback is not None:
+            return self.request.headers_callback(self)
         if self.request.header_callback is not None:
             for k, v in self.headers.get_all():
                 self.request.header_callback("%s: %s\r\n" % (k, v))
