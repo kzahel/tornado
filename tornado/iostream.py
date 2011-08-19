@@ -443,7 +443,6 @@ class IOStream(object):
                     # do I need to run write failure callback here? (YES)
                     if self._write_failure_callback:
                         self._run_callback(self._write_failure_callback)
-                    import pdb; pdb.set_trace()
                     self.close()
                     return
         if not self._write_buffer and self._write_callback:
