@@ -110,6 +110,9 @@ def _check_file(io_loop, modify_times, path):
             return
         if modify_times[path] != modified:
             logging.info("%s modified; restarting server", path)
+            if io_loop._reload_callback:
+                logging.info('reload callback registered -- running')
+                io_loop._reload_callback()
             _reload_attempted = True
             for fd in io_loop._handlers.keys():
                 try:

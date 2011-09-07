@@ -109,6 +109,7 @@ class IOLoop(object):
         self._impl = impl or _poll()
         if hasattr(self._impl, 'fileno'):
             set_close_exec(self._impl.fileno())
+        self._reload_callback = None
         self._handlers = {}
         self._events = {}
         self._callbacks = []
