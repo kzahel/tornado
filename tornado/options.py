@@ -350,20 +350,29 @@ class _LogFormatter(logging.Formatter):
             # Most methods return bytes, but only accept strings.
             # The explict calls to unicode() below are harmless in python2,
             # but will do the right conversion in python3.
-            fg_color = unicode(curses.tigetstr("setaf") or 
-                               curses.tigetstr("setf") or "", "ascii")
-            self._colors = {
-                logging.DEBUG: unicode(curses.tparm(fg_color, 4), # Blue
-                                       "ascii"),
-                logging.INFO: unicode(curses.tparm(fg_color, 2), # Green
-                                      "ascii"),
-                logging.WARNING: unicode(curses.tparm(fg_color, 3), # Yellow
-                                         "ascii"),
-                logging.ERROR: unicode(curses.tparm(fg_color, 1), # Red
-                                       "ascii"),
-            }
-            self._normal = unicode(curses.tigetstr("sgr0"), "ascii")
-
+            try:
+                fg_color = unicode(curses.tigetstr("setaf") or 
+                                   curses.tigetstr("setf") or "", "ascii")
+                self._colors = {
+                    logging.DEBUG: unicode(curses.tparm(fg_color, 4), # Blue
+                                           "ascii"),
+                    logging.INFO: unicode(curses.tparm(fg_color, 2), # Green
+                                          "ascii"),
+                    logging.WARNING: unicode(curses.tparm(fg_color, 3), # Yellow
+                                             "ascii"),
+                    logging.ERROR: unicode(curses.tparm(fg_color, 1), # Red
+                                           "ascii"),
+                }
+                self._normal = unicode(curses.tigetstr("sgr0"), "ascii")
+            except: # curses is not setup when not running in a tty (service)
+                bash_colors = dict(red=31, green=32, yellow=33, blue=34, pink=35, cyan=36, white=37)
+                self._colors = {
+                    logging.DEBUG: '\033[%s;%sm' % (0, bash_colors['blue']),
+                    logging.INFO: '\033[%s;%sm' % (0, bash_colors['green']),
+                    logging.WARNING: '\033[%s;%sm' % (0, bash_colors['yellow']),
+                    logging.ERROR: '\033[%s;%sm' % (0, bash_colors['red'])
+                    }
+                self._normal = '\033[0m'
     def format(self, record):
         try:
             record.message = record.getMessage()

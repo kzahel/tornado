@@ -82,6 +82,7 @@ from tornado import locale
 from tornado import stack_context
 from tornado import template
 from tornado.escape import utf8, _unicode
+from tornado.options import options
 from tornado.util import b, bytes_type, import_object
 
 try:
@@ -1401,8 +1402,9 @@ class Application(object):
         else:
             log_method = logging.error
         request_time = 1000.0 * handler.request.request_time()
-        log_method("%d %s %.2fms", handler.get_status(),
-                   handler._request_summary(), request_time)
+        if options.verbose > 0:
+            log_method("%d %s %.2fms", handler.get_status(),
+                       handler._request_summary(), request_time)
 
 
 
