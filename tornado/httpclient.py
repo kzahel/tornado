@@ -121,7 +121,7 @@ class AsyncHTTPClient(object):
             cls._async_client_dict = weakref.WeakKeyDictionary()
         return cls._async_client_dict
 
-    def __new__(cls, io_loop=None, max_clients=25, force_instance=False, 
+    def __new__(cls, io_loop=None, max_clients=10, force_instance=False, 
                 **kwargs):
         io_loop = io_loop or IOLoop.instance()
         if cls is AsyncHTTPClient:

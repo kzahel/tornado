@@ -61,7 +61,7 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
     should use the curl-based AsyncHTTPClient if HTTPS support is required.
 
     """
-    def initialize(self, io_loop=None, max_clients=25,
+    def initialize(self, io_loop=None, max_clients=10,
                    max_simultaneous_connections=None,
                    hostname_mapping=None, max_buffer_size=104857600):
         """Creates a AsyncHTTPClient.
