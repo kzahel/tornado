@@ -77,9 +77,17 @@ class IOStream(object):
         ioloop.IOLoop.instance().start()
 
     """
+    def __repr__(self):
+        return '<%s.%s object at %s, %s>' % (
+            self.__class__.__module__,
+            self.__class__.__name__,
+            hex(id(self)),
+            self._extra_repr
+        )
     def __init__(self, socket, io_loop=None, max_buffer_size=104857600,
                  read_chunk_size=4096):
         self.socket = socket
+        self._extra_repr = self.socket.fileno()
         self.socket.setblocking(False)
         self.io_loop = io_loop or ioloop.IOLoop.instance()
         self.max_buffer_size = max_buffer_size
