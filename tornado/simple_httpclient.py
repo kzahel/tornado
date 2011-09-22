@@ -99,10 +99,24 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
         callback = stack_context.wrap(callback)
         self.queue.append((request, callback))
         self._process_queue()
+        data = dict(request=request, callback=callback)
         if self.queue:
-            logging.info("max_clients limit reached, request queued. "
+            logging.info("max_clients limit reached - request queued. "
                           "%d active, %d queued requests." % (
                     len(self.active), len(self.queue)))
+            data['queued'] = True
+        return data
+
+    def remove_from_queue(self, request, callback):
+        if self.queue:
+            found = False
+            for item in self.queue:
+                if request == item[0] and callback == item[1]:
+                    found = True
+                    break
+            if found:
+                self.queue.remove( item )
+                logging.info('success removing request item from queue!')
 
     def _process_queue(self):
         with stack_context.NullContext():
@@ -110,10 +124,11 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
                 request, callback = self.queue.popleft()
                 key = object()
                 self.active[key] = (request, callback)
-                _HTTPConnection(self.io_loop, self, request,
+                conn = _HTTPConnection(self.io_loop, self, request,
                                 functools.partial(self._on_fetch_complete,
                                                   key, callback),
                                 self.max_buffer_size)
+                request.conn = conn
 
     def _on_fetch_complete(self, key, callback, response):
         del self.active[key]
