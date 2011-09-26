@@ -63,7 +63,9 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
     """
     def initialize(self, io_loop=None, max_clients=10,
                    max_simultaneous_connections=None,
-                   hostname_mapping=None, max_buffer_size=104857600):
+                   hostname_mapping=None, max_buffer_size=104857600,
+                   log_name=None
+                   ):
         """Creates a AsyncHTTPClient.
 
         Only a single AsyncHTTPClient instance exists per IOLoop
@@ -90,6 +92,7 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
         self.active = {}
         self.hostname_mapping = hostname_mapping
         self.max_buffer_size = max_buffer_size
+        self.log_name = log_name
 
     def fetch(self, request, callback, **kwargs):
         if not isinstance(request, HTTPRequest):
@@ -101,10 +104,14 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
         self._process_queue()
         data = dict(request=request, callback=callback)
         if self.queue:
-            logging.info("max_clients limit reached - request queued. "
-                          "%d active, %d queued requests." % (
+            logging.info("%smax_clients limit reached - request queued. "
+                          "%d active, %d queued requests." % ( (self.log_name + ' ') if self.log_name else '',
                     len(self.active), len(self.queue)))
             data['queued'] = True
+        else:
+            logging.info('%s(%s-%s/%s) fetching %s' % ( (self.log_name + ' ') if self.log_name else '', 
+                                                     len(self.active), len(self.queue), self.max_clients,
+                                                     request.url))
         return data
 
     def remove_from_queue(self, request, callback):
@@ -134,7 +141,6 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
         del self.active[key]
         callback(response)
         self._process_queue()
-
 
 
 class _HTTPConnection(object):
