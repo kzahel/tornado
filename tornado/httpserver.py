@@ -336,7 +336,12 @@ class HTTPConnection(object):
         if disconnect:
             self.stream.close()
             return
-        self.stream.read_until(b("\r\n\r\n"), self._header_callback)
+        if self.stream._blocking:
+            logging.error('_finish_request called on %s -- but it was a blocking stream' % self)
+            pass
+        else:
+            self.stream.read_until(b("\r\n\r\n"), self._header_callback)
+            
 
     def _on_headers(self, data):
         try:

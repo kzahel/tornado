@@ -106,6 +106,7 @@ class IOStream(object):
         self._close_callback = None
         self._connect_callback = None
         self._connecting = False
+        self._blocking = False
         self._state = None
         self._pending_callbacks = 0
 
