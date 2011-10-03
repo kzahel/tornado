@@ -1479,6 +1479,7 @@ class StaticFileHandler(RequestHandler):
         self.get(path, include_body=False)
 
     def get(self, path, include_body=True):
+        #logging.info('static request %s, %s' % (self.request.uri,  self.request.headers))
         if os.path.sep != "/":
             path = path.replace("/", os.path.sep)
         abspath = os.path.abspath(os.path.join(self.root, path))

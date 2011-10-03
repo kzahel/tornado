@@ -8,6 +8,7 @@ from tornado.ioloop import IOLoop
 from tornado.iostream import IOStream, SSLIOStream
 from tornado import stack_context
 from tornado.util import b
+from tornado.options import options
 
 import base64
 import collections
@@ -61,6 +62,9 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
     should use the curl-based AsyncHTTPClient if HTTPS support is required.
 
     """
+    def __repr__(self):
+        return '<SimpleAsyncHTTPClient %s>' % self.log_name
+
     def initialize(self, io_loop=None, max_clients=10,
                    max_simultaneous_connections=None,
                    hostname_mapping=None, max_buffer_size=104857600,
@@ -109,9 +113,10 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
                     len(self.active), len(self.queue)))
             data['queued'] = True
         else:
-            logging.info('%s(%s-%s/%s) fetching %s' % ( (self.log_name + ' ') if self.log_name else '', 
-                                                     len(self.active), len(self.queue), self.max_clients,
-                                                     request.url))
+            if options.verbose > 0:
+                logging.info('%s(%s-%s/%s) fetching %s' % ( (self.log_name + ' ') if self.log_name else '', 
+                                                         len(self.active), len(self.queue), self.max_clients,
+                                                         request.url))
         return data
 
     def remove_from_queue(self, request, callback):
@@ -211,10 +216,12 @@ class _HTTPConnection(object):
                                           io_loop=self.io_loop,
                                           ssl_options=ssl_options,
                                           max_buffer_size=max_buffer_size)
+                self.stream._extra_repr = (self.stream._extra_repr, client)
             else:
                 self.stream = IOStream(socket.socket(af, socktype, proto),
                                        io_loop=self.io_loop,
                                        max_buffer_size=max_buffer_size)
+                self.stream._extra_repr = (self.stream._extra_repr, client)
             timeout = min(request.connect_timeout, request.request_timeout)
             if self.request.headers_callback: self._run_callback(HTTPResponse(self.request,599,error=HTTPError(598,"No Error")))
             if timeout:
