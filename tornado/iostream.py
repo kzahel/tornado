@@ -138,6 +138,7 @@ class IOStream(object):
 
     def read_until(self, delimiter, callback):
         """Call callback when we read the given delimiter."""
+        assert not self._blocking
         assert not self._read_callback, "Already reading"
         self._read_delimiter = delimiter
         self._read_callback = stack_context.wrap(callback)
@@ -152,6 +153,7 @@ class IOStream(object):
 
     def read_bytes(self, num_bytes, callback, failure_callback=None):
         """Call callback when we read the given number of bytes."""
+        assert not self._blocking
         assert not self._read_callback, "Already reading"
         assert isinstance(num_bytes, int)
         self._read_bytes = num_bytes
@@ -170,6 +172,7 @@ class IOStream(object):
 
         Subject to ``max_buffer_size`` limit from `IOStream` constructor.
         """
+        assert not self._blocking
         assert not self._read_callback, "Already reading"
         if self.closed():
             self._run_callback(callback, self._consume(self._read_buffer_size))
@@ -186,6 +189,7 @@ class IOStream(object):
         previously buffered write data and an old write callback, that
         callback is simply overwritten with this new callback.
         """
+        assert not self._blocking
         assert isinstance(data, bytes_type)
         self._check_closed()
         self._write_buffer.append(data)
