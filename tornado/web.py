@@ -1478,8 +1478,9 @@ class StaticFileHandler(RequestHandler):
     def head(self, path):
         self.get(path, include_body=False)
 
+    @asynchronous
     def get(self, path, include_body=True):
-        #logging.info('static request %s, %s' % (self.request.uri,  self.request.headers))
+        logging.info('static request %s, %s' % (self.request.uri,  self.request.headers))
         if os.path.sep != "/":
             path = path.replace("/", os.path.sep)
         abspath = os.path.abspath(os.path.join(self.root, path))
@@ -1499,44 +1500,86 @@ class StaticFileHandler(RequestHandler):
             raise HTTPError(404)
         if not os.path.isfile(abspath):
             raise HTTPError(403, "%s is not a file", path)
+        self.set_extra_headers(path)
 
         stat_result = os.stat(abspath)
-        modified = datetime.datetime.fromtimestamp(stat_result[stat.ST_MTIME])
-
-        self.set_header("Last-Modified", modified)
-
+        
         mime_type, encoding = mimetypes.guess_type(abspath)
         if mime_type:
             self.set_header("Content-Type", mime_type)
 
-        cache_time = self.get_cache_time(path, modified, mime_type)
+        self.set_header('Accept-Ranges','bytes')
 
-        if cache_time > 0:
-            self.set_header("Expires", datetime.datetime.utcnow() + \
-                                       datetime.timedelta(seconds=cache_time))
-            self.set_header("Cache-Control", "max-age=" + str(cache_time))
-        else:
-            self.set_header("Cache-Control", "public")
+        self.file = open(abspath, "rb")
 
-        self.set_extra_headers(path)
+        if 'Range' not in self.request.headers:
+            self._transforms = []
+            modified = datetime.datetime.fromtimestamp(stat_result[stat.ST_MTIME])
+            self.set_header("Last-Modified", modified)
 
-        # Check the If-Modified-Since, and don't send the result if the
-        # content has not been modified
-        ims_value = self.request.headers.get("If-Modified-Since")
-        if ims_value is not None:
-            date_tuple = email.utils.parsedate(ims_value)
-            if_since = datetime.datetime.fromtimestamp(time.mktime(date_tuple))
-            if if_since >= modified:
-                self.set_status(304)
+            cache_time = self.get_cache_time(path, modified, mime_type)
+            if cache_time > 0:
+                self.set_header("Expires", datetime.datetime.utcnow() + \
+                                           datetime.timedelta(seconds=cache_time))
+                self.set_header("Cache-Control", "max-age=" + str(cache_time))
+            else:
+                self.set_header("Cache-Control", "public")
+
+            # Check the If-Modified-Since, and don't send the result if the
+            # content has not been modified
+            ims_value = self.request.headers.get("If-Modified-Since")
+            if ims_value is not None:
+                date_tuple = email.utils.parsedate(ims_value)
+                if_since = datetime.datetime.fromtimestamp(time.mktime(date_tuple))
+                if if_since >= modified:
+                    self.set_status(304)
+                    self.finish()
+                    return
+
+            self.bytes_start = 0
+            self.bytes_end = stat_result.st_size - 1
+            if not include_body:
+                self.file.close()
+                self.finish()
                 return
+        else:
+            logging.info('got range string %s' % self.request.headers['Range'])
+            self.set_status(206)
+            rangestr = self.request.headers['Range'].split('=')[1]
+            start, end = rangestr.split('-')
+            logging.info('seeking to start %s' % start)
+            self.bytes_start = int(start)
+            self.file.seek(self.bytes_start)
+            if not end:
+                self.bytes_end = stat_result.st_size - 1
+            else:
+                self.bytes_end = int(end)
 
-        if not include_body:
+            clenheader = 'bytes %s-%s/%s' % (self.bytes_start, self.bytes_end, stat_result.st_size)
+            self.set_header('Content-Range', clenheader)
+            self.set_header('Content-Length', self.bytes_end-self.bytes_start+1)
+            logging.info('set content range header %s' % clenheader)
+
+        if 'If-Range' in self.request.headers:
+            logging.debug('staticfilehandler had if-range header %s' % self.request.headers['If-Range'])
+
+        self.bytes_remaining = self.bytes_end - self.bytes_start
+        self.bufsize = 4096 * 16
+        self.flush() # flush out the headers
+        self.stream_one()
+
+    def stream_one(self):
+        if self.request.connection.stream.closed():
             return
-        file = open(abspath, "rb")
-        try:
-            self.write(file.read())
-        finally:
-            file.close()
+
+        if self.bytes_remaining == 0:
+            self.finish()
+        else:
+            data = self.file.read(min(self.bytes_remaining, self.bufsize))
+            self.bytes_remaining -= len(data)
+
+            logging.info('read from disk %s, remaining %s' % (len(data), self.bytes_remaining))
+            self.request.connection.stream.write( data, self.stream_one )
 
     def set_extra_headers(self, path):
         """For subclass to add extra headers to the response"""

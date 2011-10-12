@@ -434,6 +434,7 @@ class IOStream(object):
                     # with more than 128KB at a time.
                     _merge_prefix(self._write_buffer, 128 * 1024)
                 num_bytes = self.socket.send(self._write_buffer[0])
+                #logging.info('sent %s to socket' % num_bytes)
                 if num_bytes == 0:
                     # With OpenSSL, if we couldn't write the entire buffer,
                     # the very same string object must be used on the
