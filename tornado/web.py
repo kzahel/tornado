@@ -1480,7 +1480,7 @@ class StaticFileHandler(RequestHandler):
 
     @asynchronous
     def get(self, path, include_body=True):
-        logging.info('static request %s, %s' % (self.request.uri,  self.request.headers))
+        #logging.info('static request %s, %s' % (self.request.uri,  self.request.headers))
         if os.path.sep != "/":
             path = path.replace("/", os.path.sep)
         abspath = os.path.abspath(os.path.join(self.root, path))
@@ -1511,9 +1511,9 @@ class StaticFileHandler(RequestHandler):
         self.set_header('Accept-Ranges','bytes')
 
         self.file = open(abspath, "rb")
+        self._transforms = []
 
         if 'Range' not in self.request.headers:
-            self._transforms = []
             modified = datetime.datetime.fromtimestamp(stat_result[stat.ST_MTIME])
             self.set_header("Last-Modified", modified)
 
@@ -1563,7 +1563,9 @@ class StaticFileHandler(RequestHandler):
         if 'If-Range' in self.request.headers:
             logging.debug('staticfilehandler had if-range header %s' % self.request.headers['If-Range'])
 
-        self.bytes_remaining = self.bytes_end - self.bytes_start
+
+        self.bytes_remaining = self.bytes_end - self.bytes_start + 1
+        self.set_header('Content-Length', str(self.bytes_remaining))
         self.bufsize = 4096 * 16
         self.flush() # flush out the headers
         self.stream_one()
@@ -1577,8 +1579,7 @@ class StaticFileHandler(RequestHandler):
         else:
             data = self.file.read(min(self.bytes_remaining, self.bufsize))
             self.bytes_remaining -= len(data)
-
-            logging.info('read from disk %s, remaining %s' % (len(data), self.bytes_remaining))
+            #logging.info('read from disk %s, remaining %s' % (len(data), self.bytes_remaining))
             self.request.connection.stream.write( data, self.stream_one )
 
     def set_extra_headers(self, path):
