@@ -1567,14 +1567,17 @@ class StaticFileHandler(RequestHandler):
         self.bytes_remaining = self.bytes_end - self.bytes_start + 1
         self.set_header('Content-Length', str(self.bytes_remaining))
         self.bufsize = 4096 * 16
+        #logging.info('writing to frontend: %s' % self._generate_headers())
         self.flush() # flush out the headers
         self.stream_one()
 
     def stream_one(self):
         if self.request.connection.stream.closed():
+            self.file.close()
             return
 
         if self.bytes_remaining == 0:
+            self.file.close()
             self.finish()
         else:
             data = self.file.read(min(self.bytes_remaining, self.bufsize))
