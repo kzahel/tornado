@@ -1236,7 +1236,8 @@ class Application(object):
         # import is here rather than top level because HTTPServer
         # is not importable on appengine
         from tornado.httpserver import HTTPServer
-        server = HTTPServer(self, **kwargs)
+        request_callback = self
+        server = HTTPServer(request_callback, **kwargs)
         server.listen(port, address)
 
     def add_handlers(self, host_pattern, host_handlers):
@@ -1327,9 +1328,8 @@ class Application(object):
                 except TypeError:
                     pass
 
-    def __call__(self, request):
+    def _get_handler_data_for_request(self, request):
         """Called by HTTPServer to execute the request."""
-        transforms = [t(request) for t in self.transforms]
         handler = None
         args = []
         kwargs = {}
@@ -1371,7 +1371,14 @@ class Application(object):
                 for loader in RequestHandler._templates.values():
                     loader.reset()
             RequestHandler._static_hashes = {}
+        return handler, args, kwargs
 
+    def __call__(self, request):
+        if request._handler_data:
+            handler, args, kwargs = request._handler_data
+        else:
+            handler, args, kwargs = self._get_handler_data_for_request(request)
+        transforms = [t(request) for t in self.transforms]
         handler._execute(transforms, *args, **kwargs)
         return handler
 

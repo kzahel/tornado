@@ -179,11 +179,13 @@ class IOLoop(object):
 
     def add_handler(self, fd, handler, events):
         """Registers the given handler to receive the given events for fd."""
+        #logging.info('add handler %s %s %s' % (fd, handler, events))
         self._handlers[fd] = stack_context.wrap(handler)
         self._impl.register(fd, events | self.ERROR)
 
     def update_handler(self, fd, events):
         """Changes the events we listen for fd."""
+        #logging.info('update handler %s %s' % (fd, events))
         self._impl.modify(fd, events | self.ERROR)
 
     def remove_handler(self, fd):

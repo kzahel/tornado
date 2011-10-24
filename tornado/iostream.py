@@ -84,7 +84,7 @@ class IOStream(object):
             hex(id(self)),
             self._extra_repr
         )
-    def __init__(self, socket, io_loop=None, max_buffer_size=104857600,
+    def __init__(self, socket, io_loop=None, max_buffer_size=804857600,
                  read_chunk_size=4096):
         self.socket = socket
         self._extra_repr = self.socket.fileno()
@@ -98,7 +98,9 @@ class IOStream(object):
         self._write_buffer_frozen = False
         self._read_delimiter = None
         self._read_bytes = None
+        self._read_bytes_counter = None
         self._read_until_close = False
+        self._manual_read = False
         self._read_callback = None
         self._read_failure_callback = None
         self._write_callback = None
@@ -149,6 +151,37 @@ class IOStream(object):
             self._check_closed()
             if self._read_to_buffer() == 0:
                 break
+        self._add_io_state(self.io_loop.READ)
+
+    def set_read_buffer(self, data):
+        if data:
+            self._read_buffer = collections.deque([data])
+            self._read_buffer_size = len(data)
+        else:
+            self._read_buffer = collections.deque()
+            self._read_buffer_size = 0
+
+    def read_chunk(self, callback, failure_callback=None):
+        self._add_io_state(self.io_loop.READ)
+        self._handle_read()
+        #logging.info('called read_chunk')
+        assert not self._blocking
+        assert not self._read_callback, "Already reading"
+        self._read_bytes = -1
+        self._read_callback = stack_context.wrap(callback)
+        self._read_failure_callback = stack_context.wrap(failure_callback)
+
+        if self._read_from_buffer():
+            #logging.info('returning from read_chunk, read from buf returned true')
+            return
+        self._check_closed()
+        #logging.info('read_chunk->read_to_buffer')
+        result = self._read_to_buffer()
+        #logging.info('read_chunk read_to_buffer result %s' % result)
+        if result != 0:
+            self._read_from_buffer()
+
+
         self._add_io_state(self.io_loop.READ)
 
     def read_bytes(self, num_bytes, callback, failure_callback=None):
@@ -275,6 +308,7 @@ class IOStream(object):
                 assert self._state is not None, \
                     "shouldn't happen: _handle_events without self._state"
                 self._state = state
+                #logging.info('changing ioloop handler state')
                 self.io_loop.update_handler(self.socket.fileno(), self._state)
         except Exception:
             logging.error("Uncaught exception, closing connection.",
@@ -324,7 +358,13 @@ class IOStream(object):
                 # sitting in the SSL object's buffer select() and friends
                 # can't see it; the only way to find out if it's there is to
                 # try to read it.
+                #logging.info('whiletrue handle read read to buffer')
                 result = self._read_to_buffer()
+                if self._manual_read:
+                    # prevent tight loop socket read (in case localhost saturates the connection completely)
+                    #logging.info('aborting while true handle read due to manual read')
+                    break
+                #logging.info('read to buffer got result %s' % result)
             except Exception:
                 self.close()
                 return
@@ -342,6 +382,8 @@ class IOStream(object):
         """
         try:
             chunk = self.socket.recv(self.read_chunk_size)
+            #logging.info('read %s bytes from socket' % len(chunk))
+
         except socket.error, e:
             if e.args[0] in (errno.EWOULDBLOCK, errno.EAGAIN):
                 return None
@@ -361,6 +403,7 @@ class IOStream(object):
         """
         try:
             chunk = self._read_from_socket()
+            #logging.info('got data from socket %s' % (len(chunk) if chunk else None))
         except socket.error, e:
             if e.args[0] not in [errno.ECONNREFUSED]:
                 # ssl.SSLError is a subclass of socket.error
@@ -370,6 +413,8 @@ class IOStream(object):
             raise
         if chunk is None:
             return 0
+        if self._read_bytes_counter is not None:
+            self._read_bytes_counter += len(chunk)
         self._read_buffer.append(chunk)
         self._read_buffer_size += len(chunk)
         if self._read_buffer_size >= self.max_buffer_size:
@@ -383,7 +428,18 @@ class IOStream(object):
 
         Returns True if the read was completed.
         """
-        if self._read_bytes is not None:
+        #logging.info('_read_from_buffer %s, %s' % (self._read_bytes, self._read_buffer_size))
+        if self._read_bytes is not None and self._read_buffer_size > 0:
+            if self._read_bytes == -1: # read a chunk
+                callback = self._read_callback
+                self._read_callback = None
+                self._read_failure_callback = None
+                self._read_bytes = None
+                #logging.warn('set _read_bytes to None')
+                #logging.info('calling read_chunk callback with size %s' % self._read_buffer_size)
+                self._run_callback(callback) # read_chunk will manually consume from the read buffer
+                return True
+
             if self._read_buffer_size >= self._read_bytes:
                 num_bytes = self._read_bytes
                 callback = self._read_callback
@@ -487,7 +543,15 @@ class IOStream(object):
             else:
                 self._add_io_state(ioloop.IOLoop.READ)
 
+    def _toggle_read_state(self, b):
+        if not self._state: return
+        if b:
+            self._add_io_state(self, self._state & self.io_loop.READ)
+        else:
+            self._add_io_state(self, self._state & ~ self.io_loop.READ)
+
     def _add_io_state(self, state):
+        #logging.info('adding io state %s' % state)
         """Adds `state` (IOLoop.{READ,WRITE} flags) to our event handler.
 
         Implementation notes: Reads and writes have a fast path and a
@@ -607,6 +671,7 @@ class SSLIOStream(IOStream):
             # called when there is nothing to read, so we have to use
             # read() instead.
             chunk = self.socket.read(self.read_chunk_size)
+            #logging.info('read from socket of size %s' % len(chunk))
         except ssl.SSLError, e:
             # SSLError is a subclass of socket.error, so this except
             # block must come first.

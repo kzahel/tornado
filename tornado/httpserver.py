@@ -363,10 +363,18 @@ class HTTPConnection(object):
             content_length = headers.get("Content-Length")
             if content_length:
                 content_length = int(content_length)
+
+                self._request._handler_data = self.request_callback._get_handler_data_for_request(self._request)
+                if hasattr(self._request._handler_data[0], 'on_request_headers'):
+                    return self._request._handler_data[0].on_request_headers(content_length)
+
                 if content_length > self.stream.max_buffer_size:
                     raise _BadRequestException("Content-Length too long")
                 if headers.get("Expect") == "100-continue":
                     self.stream.write("HTTP/1.1 100 (Continue)\r\n\r\n")
+
+
+
                 self.stream.read_bytes(content_length, self._on_request_body)
                 return
 
@@ -476,6 +484,7 @@ class HTTPRequest(object):
     def __init__(self, method, uri, version="HTTP/1.0", headers=None,
                  body=None, remote_ip=None, protocol=None, host=None,
                  files=None, connection=None):
+        self._handler_data = None
         self.method = method
         self.uri = uri
         self.version = version
