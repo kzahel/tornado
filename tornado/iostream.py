@@ -429,8 +429,8 @@ class IOStream(object):
         Returns True if the read was completed.
         """
         #logging.info('_read_from_buffer %s, %s' % (self._read_bytes, self._read_buffer_size))
-        if self._read_bytes is not None and self._read_buffer_size > 0:
-            if self._read_bytes == -1: # read a chunk
+        if self._read_bytes is not None:
+            if self._read_buffer_size > 0 and self._read_bytes == -1: # read a chunk
                 callback = self._read_callback
                 self._read_callback = None
                 self._read_failure_callback = None
